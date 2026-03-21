@@ -1,0 +1,554 @@
+{
+  "rules": [
+    {
+      "id": "rule_001",
+      "structural_signal": "user input concatenated into query string",
+      "recommended_threat": "injection_sql",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "parameterize_queries",
+      "alternatives": ["injection_nosql", "injection_command"],
+      "rationale": "String concatenation in queries is the most common injection vector"
+    },
+    {
+      "id": "rule_002",
+      "structural_signal": "user input passed to os.system or subprocess with shell=True",
+      "recommended_threat": "injection_command",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "use_subprocess_list_without_shell",
+      "alternatives": ["injection_sql"],
+      "rationale": "Shell execution with user input enables arbitrary command execution"
+    },
+    {
+      "id": "rule_003",
+      "structural_signal": "password stored with MD5 or SHA1",
+      "recommended_threat": "auth_password_storage",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "use_bcrypt_or_argon2",
+      "alternatives": ["crypto_weak_algorithms"],
+      "rationale": "Weak hashing algorithms can be cracked in minutes with modern hardware"
+    },
+    {
+      "id": "rule_004",
+      "structural_signal": "JWT decoded without signature verification",
+      "recommended_threat": "auth_jwt_issues",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "verify_jwt_signature_and_claims",
+      "alternatives": ["auth_broken"],
+      "rationale": "Unverified JWTs allow token forgery and authentication bypass"
+    },
+    {
+      "id": "rule_005",
+      "structural_signal": "database ID from URL used directly without ownership check",
+      "recommended_threat": "authz_idor",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "add_ownership_or_authorization_check",
+      "alternatives": ["authz_privilege_escalation", "authz_missing_function_level"],
+      "rationale": "Direct object references without authorization enable horizontal privilege escalation"
+    },
+    {
+      "id": "rule_006",
+      "structural_signal": "user input rendered in HTML without escaping",
+      "recommended_threat": "input_xss_stored",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "escape_output_contextually",
+      "alternatives": ["input_xss_reflected", "input_xss_dom"],
+      "rationale": "Unescaped user content in HTML enables cross-site scripting attacks"
+    },
+    {
+      "id": "rule_007",
+      "structural_signal": "API key hardcoded in source code",
+      "recommended_threat": "crypto_hardcoded_secrets",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "move_to_environment_variables_or_secret_manager",
+      "alternatives": ["data_api_key_exposure"],
+      "rationale": "Hardcoded secrets are exposed through version control and decompilation"
+    },
+    {
+      "id": "rule_008",
+      "structural_signal": "debug mode enabled in production configuration",
+      "recommended_threat": "config_debug_production",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "disable_debug_use_environment_variable",
+      "alternatives": ["config_verbose_errors", "config_security_misconfiguration"],
+      "rationale": "Debug mode exposes interactive debuggers and source code in production"
+    },
+    {
+      "id": "rule_009",
+      "structural_signal": "no rate limiting on authentication endpoint",
+      "recommended_threat": "auth_credential_stuffing",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "implement_rate_limiting_and_lockout",
+      "alternatives": ["auth_broken", "auth_mfa_bypass"],
+      "rationale": "Unlimited login attempts enable credential stuffing and brute force attacks"
+    },
+    {
+      "id": "rule_010",
+      "structural_signal": "user-supplied URL fetched by server without validation",
+      "recommended_threat": "input_ssrf",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "validate_url_against_allowlist",
+      "alternatives": ["input_open_redirect"],
+      "rationale": "Unvalidated server-side URL fetching enables SSRF to internal services"
+    },
+    {
+      "id": "rule_011",
+      "structural_signal": "CORS origin set to wildcard with credentials",
+      "recommended_threat": "authz_cors_misconfiguration",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "whitelist_specific_origins",
+      "alternatives": ["config_security_misconfiguration"],
+      "rationale": "Permissive CORS with credentials allows cross-origin data theft"
+    },
+    {
+      "id": "rule_012",
+      "structural_signal": "XML parser does not disable external entity processing",
+      "recommended_threat": "input_xxe",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "disable_external_entities_use_defusedxml",
+      "alternatives": ["input_ssrf"],
+      "rationale": "XXE enables file reading, SSRF, and denial of service via entity expansion"
+    },
+    {
+      "id": "rule_013",
+      "structural_signal": "pickle.loads used on user-supplied data",
+      "recommended_threat": "input_deserialization",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "use_json_instead_of_pickle",
+      "alternatives": ["injection_command"],
+      "rationale": "Pickle deserialization of untrusted data enables remote code execution"
+    },
+    {
+      "id": "rule_014",
+      "structural_signal": "user input used in file path without sanitization",
+      "recommended_threat": "input_path_traversal",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "resolve_and_validate_path_within_directory",
+      "alternatives": ["data_sensitive_exposure"],
+      "rationale": "Unsanitized file paths allow reading arbitrary files via ../ traversal"
+    },
+    {
+      "id": "rule_015",
+      "structural_signal": "session ID not regenerated after authentication",
+      "recommended_threat": "auth_session_fixation",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "regenerate_session_on_login",
+      "alternatives": ["auth_broken"],
+      "rationale": "Static session IDs after login enable session fixation attacks"
+    },
+    {
+      "id": "rule_016",
+      "structural_signal": "SSL certificate verification disabled",
+      "recommended_threat": "crypto_improper_certificate",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "enable_certificate_verification",
+      "alternatives": ["crypto_cleartext_transmission"],
+      "rationale": "Disabled certificate verification enables man-in-the-middle attacks"
+    },
+    {
+      "id": "rule_017",
+      "structural_signal": "random module used for security token generation",
+      "recommended_threat": "crypto_insufficient_entropy",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_secrets_module",
+      "alternatives": ["auth_broken"],
+      "rationale": "Python random module is predictable and unsuitable for security tokens"
+    },
+    {
+      "id": "rule_018",
+      "structural_signal": "request body directly assigned to model object",
+      "recommended_threat": "authz_mass_assignment",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_explicit_field_allowlists",
+      "alternatives": ["authz_privilege_escalation"],
+      "rationale": "Mass assignment allows attackers to modify protected fields like role or is_admin"
+    },
+    {
+      "id": "rule_019",
+      "structural_signal": "admin endpoint without authentication decorator",
+      "recommended_threat": "authz_forced_browsing",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "add_authentication_and_authorization_middleware",
+      "alternatives": ["authz_missing_function_level"],
+      "rationale": "Unprotected admin endpoints allow unauthorized access to sensitive functions"
+    },
+    {
+      "id": "rule_020",
+      "structural_signal": "user input passed directly to template render",
+      "recommended_threat": "injection_template",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "pass_user_input_as_template_context_only",
+      "alternatives": ["input_xss_stored"],
+      "rationale": "Template injection enables remote code execution on the server"
+    },
+    {
+      "id": "rule_021",
+      "structural_signal": "LLM output passed to eval or exec",
+      "recommended_threat": "agent_insecure_output",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "sandbox_all_llm_code_execution",
+      "alternatives": ["agent_prompt_injection_direct"],
+      "rationale": "Executing LLM output as code bridges prompt injection to code execution"
+    },
+    {
+      "id": "rule_022",
+      "structural_signal": "agent tool calls not validated against allowlist",
+      "recommended_threat": "agent_tool_abuse",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "implement_tool_call_validation_and_allowlists",
+      "alternatives": ["agent_data_exfiltration"],
+      "rationale": "Unrestricted tool access enables privilege escalation and data exfiltration"
+    },
+    {
+      "id": "rule_023",
+      "structural_signal": "user input contains instruction override patterns",
+      "recommended_threat": "agent_prompt_injection_direct",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "deploy_prompt_injection_detection",
+      "alternatives": ["agent_jailbreak"],
+      "rationale": "Instruction overrides in user input lead to complete agent takeover"
+    },
+    {
+      "id": "rule_024",
+      "structural_signal": "retrieved content contains hidden instructions",
+      "recommended_threat": "agent_prompt_injection_indirect",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "filter_retrieved_content_for_injection_patterns",
+      "alternatives": ["agent_context_poisoning"],
+      "rationale": "Indirect injection through data sources is harder to detect than direct injection"
+    },
+    {
+      "id": "rule_025",
+      "structural_signal": "agent makes HTTP request to unexpected external domain",
+      "recommended_threat": "agent_data_exfiltration",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "implement_domain_allowlist_for_agent_network_access",
+      "alternatives": ["agent_tool_abuse"],
+      "rationale": "Unrestricted external requests enable data exfiltration via agent tools"
+    },
+    {
+      "id": "rule_026",
+      "structural_signal": "MCP server connected from unverified source",
+      "recommended_threat": "agent_malicious_mcp",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "verify_mcp_server_integrity_and_allowlist",
+      "alternatives": ["agent_tool_abuse"],
+      "rationale": "Malicious MCP servers can poison tools, context, and exfiltrate data"
+    },
+    {
+      "id": "rule_027",
+      "structural_signal": "agent writes user input directly to persistent memory",
+      "recommended_threat": "agent_memory_poisoning",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "validate_and_classify_memory_writes",
+      "alternatives": ["agent_context_poisoning"],
+      "rationale": "Unsanitized memory writes create persistent backdoors across sessions"
+    },
+    {
+      "id": "rule_028",
+      "structural_signal": "file uploaded without content type validation",
+      "recommended_threat": "input_file_upload",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "validate_file_type_by_content_and_extension",
+      "alternatives": ["injection_command"],
+      "rationale": "Unvalidated file uploads can deliver web shells and malware"
+    },
+    {
+      "id": "rule_029",
+      "structural_signal": "API response returns full database object without field filtering",
+      "recommended_threat": "data_sensitive_exposure",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_serializers_with_explicit_field_allowlists",
+      "alternatives": ["data_pii_leaks"],
+      "rationale": "Returning raw database objects exposes internal fields and sensitive data"
+    },
+    {
+      "id": "rule_030",
+      "structural_signal": "dependencies not pinned to specific versions",
+      "recommended_threat": "supply_dependency_vuln",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "pin_versions_and_implement_dependency_scanning",
+      "alternatives": ["supply_typosquatting", "supply_malicious_packages"],
+      "rationale": "Unpinned dependencies may silently pull in vulnerable or compromised versions"
+    },
+    {
+      "id": "rule_031",
+      "structural_signal": "HTTP connection used instead of HTTPS for external API",
+      "recommended_threat": "crypto_cleartext_transmission",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_https_for_all_external_communications",
+      "alternatives": ["crypto_improper_certificate"],
+      "rationale": "Cleartext HTTP enables interception of sensitive data in transit"
+    },
+    {
+      "id": "rule_032",
+      "structural_signal": "security headers not set on HTTP responses",
+      "recommended_threat": "config_missing_headers",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "set_csp_xfo_xcto_hsts_headers",
+      "alternatives": ["config_security_misconfiguration"],
+      "rationale": "Missing security headers leave browsers vulnerable to clickjacking and XSS"
+    },
+    {
+      "id": "rule_033",
+      "structural_signal": "user input logged without sanitization",
+      "recommended_threat": "injection_log",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "sanitize_log_input_use_structured_logging",
+      "alternatives": ["data_pii_leaks"],
+      "rationale": "Unsanitized log input enables log forging and log injection attacks"
+    },
+    {
+      "id": "rule_034",
+      "structural_signal": "GraphQL introspection enabled in production",
+      "recommended_threat": "injection_graphql",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "disable_introspection_set_depth_limits",
+      "alternatives": ["config_security_misconfiguration"],
+      "rationale": "GraphQL introspection reveals entire API schema to attackers"
+    },
+    {
+      "id": "rule_035",
+      "structural_signal": "password comparison using equality operator",
+      "recommended_threat": "auth_broken",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "use_constant_time_comparison",
+      "alternatives": ["auth_password_storage"],
+      "rationale": "Equality comparison leaks password information through timing side channels"
+    },
+    {
+      "id": "rule_036",
+      "structural_signal": "redirect URL taken from query parameter without validation",
+      "recommended_threat": "input_open_redirect",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "validate_redirect_against_allowlist",
+      "alternatives": ["input_xss_reflected"],
+      "rationale": "Open redirects enable phishing attacks using the trusted domain"
+    },
+    {
+      "id": "rule_037",
+      "structural_signal": "user role updatable via client request",
+      "recommended_threat": "authz_privilege_escalation",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "enforce_server_side_role_validation",
+      "alternatives": ["authz_mass_assignment"],
+      "rationale": "Client-controlled roles enable trivial privilege escalation to admin"
+    },
+    {
+      "id": "rule_038",
+      "structural_signal": "default admin credentials in configuration",
+      "recommended_threat": "config_default_credentials",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "require_credential_change_on_first_login",
+      "alternatives": ["crypto_hardcoded_secrets"],
+      "rationale": "Default credentials are publicly known and enable immediate unauthorized access"
+    },
+    {
+      "id": "rule_039",
+      "structural_signal": "sensitive data stored in shared cache without access control",
+      "recommended_threat": "data_cache_exposure",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "encrypt_cached_data_use_per_user_keys",
+      "alternatives": ["data_sensitive_exposure"],
+      "rationale": "Unprotected cached data accessible to any user sharing the cache"
+    },
+    {
+      "id": "rule_040",
+      "structural_signal": "LDAP filter built with string formatting from user input",
+      "recommended_threat": "injection_ldap",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_ldap_escape_filter_chars",
+      "alternatives": ["injection_sql"],
+      "rationale": "LDAP filter injection can bypass authentication and extract directory data"
+    },
+    {
+      "id": "rule_041",
+      "structural_signal": "no token budget or step limit on agent execution",
+      "recommended_threat": "agent_dos_token_exhaustion",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "implement_token_budgets_and_step_limits",
+      "alternatives": ["agent_tool_abuse"],
+      "rationale": "Unbounded agent execution enables cost explosion and service denial"
+    },
+    {
+      "id": "rule_042",
+      "structural_signal": "error response includes stack trace or system prompt",
+      "recommended_threat": "agent_info_disclosure",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "return_generic_errors_log_details_server_side",
+      "alternatives": ["config_verbose_errors"],
+      "rationale": "Information disclosure aids attacker reconnaissance for further exploits"
+    },
+    {
+      "id": "rule_043",
+      "structural_signal": "fine-tuning data loaded without validation or provenance check",
+      "recommended_threat": "agent_model_manipulation",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "validate_training_data_with_provenance_tracking",
+      "alternatives": ["agent_supply_chain"],
+      "rationale": "Contaminated training data can introduce persistent backdoors in models"
+    },
+    {
+      "id": "rule_044",
+      "structural_signal": "agent framework dependencies not pinned with integrity hashes",
+      "recommended_threat": "agent_supply_chain",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "pin_dependencies_with_hashes_and_audit",
+      "alternatives": ["supply_dependency_vuln"],
+      "rationale": "Unpinned agent dependencies risk pulling in compromised library versions"
+    },
+    {
+      "id": "rule_045",
+      "structural_signal": "nested quantifiers in regex processing user input",
+      "recommended_threat": "input_regex_dos",
+      "severity": "medium",
+      "priority": 3,
+      "recommended_action": "use_linear_time_regex_engine_or_limit_input",
+      "alternatives": [],
+      "rationale": "Nested quantifiers cause catastrophic backtracking on crafted inputs"
+    },
+    {
+      "id": "rule_046",
+      "structural_signal": "encryption key stored in source code or configuration",
+      "recommended_threat": "crypto_key_management",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_dedicated_key_management_system",
+      "alternatives": ["crypto_hardcoded_secrets"],
+      "rationale": "Keys in code or config are exposed through version control and backups"
+    },
+    {
+      "id": "rule_047",
+      "structural_signal": "CI pipeline runs untrusted code from pull requests",
+      "recommended_threat": "supply_ci_compromise",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "isolate_pr_builds_restrict_secret_access",
+      "alternatives": ["supply_malicious_packages"],
+      "rationale": "Untrusted PR code in CI can steal secrets and compromise build artifacts"
+    },
+    {
+      "id": "rule_048",
+      "structural_signal": "admin panel accessible without VPN or IP restriction",
+      "recommended_threat": "config_exposed_admin",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "restrict_admin_to_internal_network_or_vpn",
+      "alternatives": ["authz_forced_browsing"],
+      "rationale": "Internet-exposed admin panels are prime targets for brute force and exploitation"
+    },
+    {
+      "id": "rule_049",
+      "structural_signal": "PII fields included in log messages",
+      "recommended_threat": "data_pii_leaks",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "mask_pii_in_logs_use_structured_logging",
+      "alternatives": ["data_sensitive_exposure"],
+      "rationale": "PII in logs violates privacy regulations and creates breach liability"
+    },
+    {
+      "id": "rule_050",
+      "structural_signal": "innerHTML set from user-controlled data",
+      "recommended_threat": "input_xss_dom",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_textContent_or_dompurify",
+      "alternatives": ["input_xss_stored", "input_xss_reflected"],
+      "rationale": "innerHTML with user data enables DOM-based cross-site scripting"
+    },
+    {
+      "id": "rule_051",
+      "structural_signal": "database backup stored in web-accessible directory",
+      "recommended_threat": "data_database_dumps",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "store_backups_encrypted_outside_web_root",
+      "alternatives": ["data_sensitive_exposure"],
+      "rationale": "Web-accessible database dumps expose entire datasets to public download"
+    },
+    {
+      "id": "rule_052",
+      "structural_signal": "input requests agent to adopt unrestricted persona",
+      "recommended_threat": "agent_jailbreak",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "deploy_jailbreak_detection_classifiers",
+      "alternatives": ["agent_prompt_injection_direct"],
+      "rationale": "Persona manipulation gradually erodes safety guardrails across turns"
+    },
+    {
+      "id": "rule_053",
+      "structural_signal": "user input concatenated into LDAP filter or XPath expression",
+      "recommended_threat": "injection_ldap",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "use_parameterized_queries_and_escaping",
+      "alternatives": ["injection_xpath"],
+      "rationale": "Unescaped input in LDAP/XPath enables query manipulation and data extraction"
+    },
+    {
+      "id": "rule_054",
+      "structural_signal": "MFA check only on frontend not enforced server-side",
+      "recommended_threat": "auth_mfa_bypass",
+      "severity": "high",
+      "priority": 2,
+      "recommended_action": "enforce_mfa_server_side_at_every_auth_check",
+      "alternatives": ["auth_broken"],
+      "rationale": "Client-side-only MFA is trivially bypassed by directly calling the API"
+    },
+    {
+      "id": "rule_055",
+      "structural_signal": "MongoDB query built directly from request JSON body",
+      "recommended_threat": "injection_nosql",
+      "severity": "critical",
+      "priority": 1,
+      "recommended_action": "validate_and_typecast_all_query_parameters",
+      "alternatives": ["injection_sql"],
+      "rationale": "NoSQL operator injection in MongoDB bypasses authentication and extracts data"
+    }
+  ]
+}

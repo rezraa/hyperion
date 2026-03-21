@@ -1,0 +1,237 @@
+<!-- Copyright (c) 2026 Reza Malik. Licensed under the Apache License, Version 2.0. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hyperion — Security Operations</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <!-- Inline SVG favicon: shield icon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><path d='M50 5 L90 25 L90 55 C90 75 70 92 50 98 C30 92 10 75 10 55 L10 25 Z' fill='none' stroke='%2300ff88' stroke-width='6'/><path d='M50 30 L50 65 M35 50 L50 65 L65 50' fill='none' stroke='%2300ff88' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <style>
+    /* Preload font hint */
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap');
+  </style>
+</head>
+<body>
+
+<div class="dashboard">
+
+  <!-- ===== Header ===== -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="header-ascii">
+ _  _ _   _ ___  ___ ___ ___ ___  _  _
+| || | \ / | _ \| __| _ \_ _/ _ \| \| |
+| __ |\V/||  _/| _||   /| | (_) | .` |
+|_||_| |_| |_|  |___|_|_\___\___/|_|\_|</div>
+      <div>
+        <div class="header-title">Hyperion</div>
+        <div class="header-subtitle">Security Operations Center</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px">
+      <button id="alert-toggle" class="scan-btn" style="color:#555570;border-color:#555570;font-size:0.65rem;padding:4px 10px">ALERTS: OFF</button>
+      <button class="scan-btn" onclick="fetch('/api/scan',{method:'POST'}).then(r=>r.json()).then(d=>console.log('Scan:',d))">SCAN</button>
+      <div class="connection-status">
+        <div class="connection-dot disconnected" id="connection-dot"></div>
+        <span id="connection-text">CONNECTING...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== Threat Summary Counters ===== -->
+  <section class="threat-summary">
+    <div class="threat-counter severity-critical">
+      <div class="count" id="count-critical">0</div>
+      <div class="label">Critical</div>
+    </div>
+    <div class="threat-counter severity-high">
+      <div class="count" id="count-high">0</div>
+      <div class="label">High</div>
+    </div>
+    <div class="threat-counter severity-medium">
+      <div class="count" id="count-medium">0</div>
+      <div class="label">Medium</div>
+    </div>
+    <div class="threat-counter severity-low">
+      <div class="count" id="count-low">0</div>
+      <div class="label">Low</div>
+    </div>
+    <div class="threat-counter severity-total">
+      <div class="count" id="count-total">0</div>
+      <div class="label">Total</div>
+    </div>
+    <div class="threat-counter severity-risk">
+      <div class="count" id="count-risk">0.0</div>
+      <div class="label">Risk Score</div>
+    </div>
+  </section>
+
+  <!-- ===== Main Content: Charts | Feed | Surface ===== -->
+  <main class="main-content">
+
+    <!-- Left: Charts -->
+    <div class="charts-column">
+      <div class="panel">
+        <div class="panel-header">Risk Gauge</div>
+        <div class="panel-body gauge-container">
+          <canvas id="gauge-canvas" class="chart-canvas"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">Severity Distribution</div>
+        <div class="panel-body">
+          <canvas id="donut-canvas" class="chart-canvas"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">Timeline</div>
+        <div class="panel-body">
+          <canvas id="timeline-canvas" class="chart-canvas"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center: Findings Feed -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-header">
+        <span>Live Findings</span>
+      </div>
+      <div class="filter-bar">
+        <select id="filter-severity">
+          <option value="">All Severities</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+          <option value="info">Info</option>
+        </select>
+        <select id="filter-category">
+          <option value="">All Categories</option>
+        </select>
+        <select id="filter-status">
+          <option value="">All Status</option>
+          <option value="new">New</option>
+          <option value="investigating">Investigating</option>
+          <option value="remediated">Remediated</option>
+        </select>
+      </div>
+      <div class="panel-body" id="findings-feed">
+        <div class="empty-state">
+          <div class="shield">&#9737;</div>
+          <p>No findings yet.<br>Trigger a scan or await incoming results.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Attack Surface + Info -->
+    <div class="right-column">
+      <div class="panel">
+        <div class="panel-header">Attack Surface Map</div>
+        <div class="panel-body">
+          <canvas id="surface-canvas" class="chart-canvas"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">Threat Indicators</div>
+        <div class="panel-body" id="threat-bars">
+          <div class="threat-bars">
+            <div class="threat-bar">
+              <span class="bar-label">CRIT</span>
+              <div class="bar-track"><div class="bar-fill" id="bar-critical" style="width:0%;background:#ff0040"></div></div>
+              <span class="bar-count" id="bar-count-critical">0</span>
+            </div>
+            <div class="threat-bar">
+              <span class="bar-label">HIGH</span>
+              <div class="bar-track"><div class="bar-fill" id="bar-high" style="width:0%;background:#ff6600"></div></div>
+              <span class="bar-count" id="bar-count-high">0</span>
+            </div>
+            <div class="threat-bar">
+              <span class="bar-label">MED</span>
+              <div class="bar-track"><div class="bar-fill" id="bar-medium" style="width:0%;background:#ffaa00"></div></div>
+              <span class="bar-count" id="bar-count-medium">0</span>
+            </div>
+            <div class="threat-bar">
+              <span class="bar-label">LOW</span>
+              <div class="bar-track"><div class="bar-fill" id="bar-low" style="width:0%;background:#00aaff"></div></div>
+              <span class="bar-count" id="bar-count-low">0</span>
+            </div>
+            <div class="threat-bar">
+              <span class="bar-label">INFO</span>
+              <div class="bar-track"><div class="bar-fill" id="bar-info" style="width:0%;background:#666680"></div></div>
+              <span class="bar-count" id="bar-count-info">0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="panel-header">Status</div>
+        <div class="panel-body" style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);line-height:1.8">
+          <div>Engine: <span style="color:#00ff88">HYPERION v1.0</span></div>
+          <div>Mode: <span style="color:#00aaff">REAL-TIME</span></div>
+          <div>Scanner: <span style="color:#ffaa00">STANDING BY</span></div>
+          <div>Store: <span style="color:#e0e0e8">IN-MEMORY (1000 max)</span></div>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1a1a2e;font-size:0.6rem;color:#555570">
+            Findings stream via WebSocket.<br>
+            POST /api/findings to ingest.<br>
+            POST /api/scan to trigger analysis.
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+</div>
+
+<!-- Code Viewer Modal -->
+<div class="code-viewer-overlay" id="code-overlay">
+  <div class="code-viewer" id="code-viewer"></div>
+</div>
+
+<script src="/static/dashboard.js"></script>
+
+<!-- Update threat bars from stats (driven by dashboard.js stats updates) -->
+<script>
+(function() {
+  // Observe stats changes and update threat bars
+  var prevStats = null;
+  setInterval(function() {
+    var sev = window.__hyperionStats;
+    if (!sev) return;
+    var bySev = sev.by_severity || {};
+    var total = sev.total || 1;
+    ["critical","high","medium","low","info"].forEach(function(s) {
+      var count = bySev[s] || 0;
+      var bar = document.getElementById("bar-" + s);
+      var countEl = document.getElementById("bar-count-" + s);
+      if (bar) bar.style.width = Math.min(100, (count / Math.max(total, 1)) * 100) + "%";
+      if (countEl) countEl.textContent = count;
+    });
+  }, 500);
+})();
+</script>
+
+<!-- Expose stats for threat bar updater -->
+<script>
+(function() {
+  // Patch the dashboard.js stats handler to expose stats globally
+  var origOnMessage = null;
+  var checkWs = setInterval(function() {
+    // Monitor stats via polling the DOM counters (simpler than patching)
+    var total = parseInt(document.getElementById("count-total").textContent) || 0;
+    var crit = parseInt(document.getElementById("count-critical").textContent) || 0;
+    var high = parseInt(document.getElementById("count-high").textContent) || 0;
+    var med = parseInt(document.getElementById("count-medium").textContent) || 0;
+    var low = parseInt(document.getElementById("count-low").textContent) || 0;
+    window.__hyperionStats = {
+      total: total,
+      by_severity: { critical: crit, high: high, medium: med, low: low, info: total - crit - high - med - low }
+    };
+  }, 500);
+})();
+</script>
+
+</body>
+</html>
