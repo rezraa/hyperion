@@ -39,6 +39,28 @@ def get_knowledge(conn: Any = None) -> KnowledgeLoader:
 
 
 # ---------------------------------------------------------------------------
+# Unmatched signal logging — seeds future knowledge base entries
+# ---------------------------------------------------------------------------
+
+def log_unmatched_signals(
+    signals: list[str],
+    tool_name: str,
+    titan: str = "hyperion",
+) -> None:
+    """Append unmatched structural signals to ~/.othrys/unmatched_signals.jsonl."""
+    log_path = Path.home() / ".othrys" / "unmatched_signals.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = json.dumps({
+        "titan": titan,
+        "tool": tool_name,
+        "signals": signals,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    with open(log_path, "a") as f:
+        f.write(entry + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Finding log -- local JSON file for standalone mode
 # ---------------------------------------------------------------------------
 
