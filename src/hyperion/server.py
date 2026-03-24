@@ -312,7 +312,7 @@ def scan_code(
 @mcp.tool()
 def assess_threat(
     system_description: str,
-    structural_signals: Union[list[str], str, None] = None,
+    structural_signals: Union[list[str], str],
     assets: Union[list[str], str, None] = None,
     constraints: Union[dict[str, Any], str, None] = None,
     conn: Any = None,
