@@ -62,38 +62,30 @@ def _write_to_graph(
 
     content_json = json.dumps(record)
 
-    try:
-        conn.execute(
-            "CREATE (m:memories {"
-            "  memory_type: $type,"
-            "  content: $content,"
-            "  timestamp: $ts,"
-            "  source: $source"
-            "})",
-            parameters={
-                "type": "security_finding",
-                "content": content_json,
-                "ts": timestamp,
-                "source": f"hyperion:{mode}",
-            },
-        )
-    except Exception as exc:
-        # If the parameterised query fails (schema variation), try string
-        # interpolation as fallback -- Kuzu/LadybugDB schema may differ.
-        logger.warning("Parameterised insert failed (%s), trying fallback", exc)
-        try:
-            escaped = content_json.replace("'", "\\'")
-            conn.execute(
-                f"CREATE (m:memories {{"
-                f"  memory_type: 'security_finding',"
-                f"  content: '{escaped}',"
-                f"  timestamp: '{timestamp}',"
-                f"  source: 'hyperion:{mode}'"
-                f"}})"
-            )
-        except Exception as exc2:
-            logger.error("Graph write failed: %s", exc2)
-            raise
+    conn.execute(
+        "CREATE (m:memories {"
+        "  id: $id,"
+        "  content: $content,"
+        "  memory_type: $type,"
+        "  status: $status,"
+        "  outcome: $outcome,"
+        "  agent: $agent,"
+        "  project: $project,"
+        "  confidence: $confidence,"
+        "  timestamp: $ts"
+        "})",
+        parameters={
+            "id": finding_id,
+            "content": content_json,
+            "type": "security_finding",
+            "status": "active",
+            "outcome": severity,
+            "agent": "hyperion",
+            "project": f"hyperion:{mode}",
+            "confidence": 1.0,
+            "ts": timestamp,
+        },
+    )
 
     return finding_id
 
