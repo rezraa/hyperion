@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Valid modes and severities
 # ---------------------------------------------------------------------------
 
-_VALID_MODES = {"scan", "assessment", "incident", "remediation"}
+_VALID_MODES = {"scan", "assessment", "audit", "incident", "remediation"}
 _VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 
 
@@ -106,7 +106,7 @@ def log_finding(
 
     Args:
         mode: Context of the finding -- one of ``"scan"``, ``"assessment"``,
-            ``"incident"``, ``"remediation"``.
+            ``"audit"``, ``"incident"``, ``"remediation"``.
         target: Identifier for the scanned target (file path, system name,
             endpoint URL, etc.).
         severity: Finding severity -- one of ``"critical"``, ``"high"``,
