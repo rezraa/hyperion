@@ -1110,7 +1110,7 @@ def log_finding(
                 parameters={
                     "id": finding_id,
                     "mode": mode,
-                    "content": _json.dumps(record),
+                    "content": "JSON:" + _json.dumps(record),
                     "importance": {"CRITICAL": 10, "HIGH": 8, "MEDIUM": 5, "LOW": 3, "INFO": 1}.get(severity.upper(), 5),
                     "ts": ts,
                 },

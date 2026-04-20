@@ -64,7 +64,7 @@ class GraphKnowledgeLoader(KnowledgeLoader):
         raw = json.dumps(data_with_ts, sort_keys=True)
         memory_id = "m-" + hashlib.sha256(raw.encode()).hexdigest()[:12]
 
-        data_str = json.dumps(data_with_ts)
+        data_str = "JSON:" + json.dumps(data_with_ts)
 
         try:
             self._conn.execute(
