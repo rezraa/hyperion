@@ -14,7 +14,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from hyperion.tools._shared import coerce, emit_event, get_knowledge
+from hyperion.tools._shared import coerce, emit_event, get_knowledge, normalize_kwargs
+
+# Caller kwarg synonyms remapped to the canonical signature.
+_ALIASES = {"security_context": "context"}
+_IGNORED: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Detection patterns -- real regex-based security scanners
@@ -471,6 +475,7 @@ def _has_agent_signals(code: str) -> bool:
 # Main tool
 # ---------------------------------------------------------------------------
 
+@normalize_kwargs
 def scan_code(
     code: str,
     language: str = "python",

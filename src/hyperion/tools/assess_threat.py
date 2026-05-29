@@ -334,9 +334,9 @@ def assess_threat(
         Dict with keys: matched_rules, threat_model, agent_threats,
         recommended_tools, risk_summary.
     """
-    structural_signals = coerce(structural_signals, list) or []
-    assets = coerce(assets, list) or []
-    constraints = coerce(constraints, dict) or {}
+    structural_signals = coerce(structural_signals, list, default=[])
+    assets = coerce(assets, list, default=[])
+    constraints = coerce(constraints, dict, default={})
 
     environment = constraints.get("environment", "production")
     compliance = constraints.get("compliance", [])

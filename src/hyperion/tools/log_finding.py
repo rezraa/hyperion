@@ -12,7 +12,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperion.tools._shared import append_finding, coerce, emit_event
+from hyperion.tools._shared import (
+    append_finding,
+    coerce_or_raise,
+    emit_event,
+    normalize_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 _VALID_MODES = {"scan", "assessment", "audit", "incident", "remediation"}
 _VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+
+# Caller kwarg synonyms remapped to the canonical signature.
+_ALIASES = {"finding": "finding_type"}
+_IGNORED: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +103,7 @@ def _write_to_graph(
 # Main tool
 # ---------------------------------------------------------------------------
 
+@normalize_kwargs
 def log_finding(
     mode: str,
     target: str,
@@ -129,7 +139,14 @@ def log_finding(
         Dict with keys: logged, finding_id, mode, target, severity,
         finding_type, timestamp, storage_mode.
     """
-    details = coerce(details, dict) or {}
+    try:
+        details = coerce_or_raise(details, dict, empty_default={})
+    except TypeError as exc:
+        raise TypeError(
+            "log_finding: 'details' must be a dict "
+            "(or JSON object string); "
+            f"got {type(details).__name__}"
+        ) from exc
 
     # Validate mode
     effective_mode = mode.lower().strip()
