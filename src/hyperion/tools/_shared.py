@@ -43,6 +43,20 @@ def get_knowledge(conn: Any = None) -> KnowledgeLoader:
 
 
 # ---------------------------------------------------------------------------
+# Caller-boundary ceiling — one source of truth for the Shape-C tool retrofits
+# ---------------------------------------------------------------------------
+# The retrieval engine bounds its OWN fan-out (loader._SEED_CAP / _TOPK_CAP); this
+# bounds the UNTRUSTED caller input BEFORE that engine is reached, applied where the
+# per-id cost is incurred. Declared once here so a second tool cannot drift a second
+# copy. Each retrofit applies it at its own untrusted read: assess_threat caps the
+# matched_signal_ids list before the hydrate lookup loop; plan_remediation caps the
+# finding's deduped cwe list (and the resolved vector set) before the per-vector
+# signal_ids_for loop. get_signal_index is a read-only accessor with no unbounded
+# caller input, so it needs none.
+_MAX_MATCHED_SIGNALS = 256      # cap on caller-supplied ids, bound where the cost is incurred
+
+
+# ---------------------------------------------------------------------------
 # Unmatched signal logging — seeds future knowledge base entries
 # ---------------------------------------------------------------------------
 
@@ -143,6 +157,44 @@ def emit_event(event_name: str, payload: dict[str, Any]) -> None:
             f.write(json.dumps(event) + "\n")
     except Exception:
         pass  # best-effort -- never break tool execution
+
+
+# ---------------------------------------------------------------------------
+# Hydrated-node projection — one source of truth for the Shape-C tool retrofits
+# ---------------------------------------------------------------------------
+# assess_threat (S3) and plan_remediation (S4) both project a hydrated,
+# deep-frozen node onto its OWN surfaced fields + its retrieval votes. Declared
+# once here (the shared tool-utilities home) so a second tool cannot drift a
+# second copy of the projection.
+
+
+def _plain(value: Any) -> Any:
+    """Recursively copy a deep-frozen hydrated value into plain JSON types.
+
+    Hydrated nodes are ``_FrozenDict``/tuple (immutable, corpus-safe); this returns
+    a mutable, JSON-native copy so the tool's output surface is ordinary lists/dicts
+    while the shared corpus behind it stays sealed. (A frozen tuple would also
+    compare unequal to the plain list a caller asserts against.)
+    """
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+def project_node(node: dict, fields: tuple[str, ...]) -> dict:
+    """Project a hydrated node onto its OWN surfaced fields + its retrieval votes.
+
+    Reads only the node's own data — never a hardcoded table, and never a husk (the
+    engine's husk guard already dropped field-short nodes upstream). A field the node
+    does not carry is simply omitted; ``retrieval`` carries the transparent vote tally.
+    """
+    out: dict[str, Any] = {
+        f: _plain(node[f]) for f in fields if node.get(f) is not None
+    }
+    out["retrieval"] = _plain(node["retrieval"])
+    return out
 
 
 # ---------------------------------------------------------------------------

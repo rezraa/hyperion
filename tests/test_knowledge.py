@@ -92,26 +92,6 @@ class TestSecurityTools:
         assert len(agent_tools) >= 3
 
 
-class TestSignalMatching:
-
-    def test_exact_signal_match(self, kb):
-        matches = kb.match_structural_signals(
-            ["user input concatenated into query string"]
-        )
-        assert len(matches) >= 1
-
-    def test_no_match_for_gibberish(self, kb):
-        matches = kb.match_structural_signals(["xyzzy foobar"])
-        assert len(matches) == 0
-
-    def test_multiple_signals(self, kb):
-        matches = kb.match_structural_signals([
-            "user input concatenated into query",
-            "session token stored in cookie without secure flag",
-        ])
-        assert len(matches) >= 1
-
-
 class TestDetectionPatterns:
 
     def test_sql_injection_has_patterns(self, kb):

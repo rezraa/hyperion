@@ -7,6 +7,7 @@ import pytest
 
 from hyperion.tools.scan_code import scan_code
 from hyperion.tools.assess_threat import assess_threat
+from hyperion.tools.get_signal_index import get_signal_index
 from hyperion.tools.plan_remediation import plan_remediation
 from hyperion.tools.monitor_threat import monitor_threat
 from hyperion.tools.log_finding import log_finding
@@ -87,63 +88,59 @@ class TestScanCode:
 
 
 class TestAssessThreat:
+    # S3 retrofit: assess_threat retrieves via matched_signal_ids recognised
+    # against get_signal_index; deep coverage lives in test_hyperion_retrofit_s3.
 
-    def test_returns_structure(self):
-        result = assess_threat(
-            system_description="Web API with database and user auth",
-            structural_signals=["user input to database"],
+    def test_returns_threat_model_from_matched_ids(self):
+        view = get_signal_index()["threat_signals"]
+        sid = next(
+            e["signal_id"] for e in view
+            if e["signal_text"] == "user input concatenated into SQL query string"
         )
-        assert "matched_rules" in result or "threat_model" in result
+        result = assess_threat("Web API with a database", [sid])
+        assert "threat_model" in result
+        assert result["threat_model"]
 
-    def test_agent_system_signals(self):
-        result = assess_threat(
-            system_description="LLM agent with tool calling and persistent memory",
-            structural_signals=["agent accepts user prompts", "agent calls external tools"],
-        )
-        # Should return a valid structure with some threat data
+    def test_agent_signals_hydrate_agent_risks(self):
+        sid = get_signal_index()["agent_threat_signals"][0]["signal_id"]
+        result = assess_threat("LLM agent with tool calling", [sid])
         assert isinstance(result, dict)
-        # Check for agent related content anywhere in the result
-        result_str = str(result).lower()
-        has_agent = "agent" in result_str or "prompt" in result_str or "llm" in result_str
-        assert has_agent, "Agent system should trigger agent-related threat detection"
+        assert result["agent_risks"], "an agent detection signal must yield agent_risks"
 
     def test_empty_signals(self):
-        result = assess_threat(
-            system_description="Simple calculator",
-            structural_signals=[],
-        )
+        result = assess_threat("Simple calculator", [])
         assert isinstance(result, dict)
+        assert result["threat_model"] == []
+        assert result["threat_retrieval_state"] == "no_match"
 
 
 class TestPlanRemediation:
+    # Migrated to the S4 contract: remediation is HYDRATED from the corpus vector
+    # (seed-from-node by threat_id / cwe), no inline island, no language-keyed
+    # code_fix. The old ``language``/``constraints``/``steps``/``code_fix`` shape is
+    # retired with the islands (no shim) -- these tests bind the new contract.
 
-    def test_returns_remediation_steps(self):
+    def test_hydrates_corpus_remediation(self):
         result = plan_remediation(
             finding={
                 "threat_id": "injection_sql",
                 "severity": "critical",
                 "description": "SQL injection via string concatenation",
             },
-            language="python",
         )
-        assert "remediation_steps" in result or "steps" in result or "fix" in result
+        assert result["retrieval_state"] == "hit"
+        entry = next(e for e in result["remediations"] if e["id"] == "injection_sql")
+        assert entry["remediation"]                     # the corpus remediation string
+        assert "parameterized" in entry["remediation"].lower()
 
-    def test_returns_code_fix(self):
+    def test_surfaces_corpus_examples(self):
         result = plan_remediation(
-            finding={
-                "threat_id": "injection_sql",
-                "severity": "critical",
-                "code_context": 'cursor.execute(f"SELECT * FROM users WHERE id = {uid}")',
-            },
-            language="python",
+            finding={"threat_id": "injection_sql", "severity": "critical"},
         )
-        # Should have some form of code fix
-        has_fix = (
-            "code_fix" in result
-            or "secure" in str(result).lower()
-            or "parameterized" in str(result).lower()
-        )
-        assert has_fix
+        entry = next(e for e in result["remediations"] if e["id"] == "injection_sql")
+        # The corpus vector's own vulnerable/secure examples, not an island code_fix.
+        assert "secure" in entry["examples"]
+        assert "vulnerable" in entry["examples"]
 
 
 class TestMonitorThreat:
@@ -221,11 +218,11 @@ class TestCoerce:
 class TestAssessThreatHardening:
 
     def test_truthy_wrong_type_constraints_does_not_crash(self):
-        # A non-empty list where a dict is expected used to survive
+        # A non-empty list where a dict is expected must coerce to {}, not survive
         # `coerce(...) or {}` and crash on `.get()`.
         result = assess_threat(
             system_description="API with DB",
-            structural_signals=["database"],
+            matched_signal_ids=[],
             constraints=["not", "a", "dict"],
         )
         assert isinstance(result, dict)

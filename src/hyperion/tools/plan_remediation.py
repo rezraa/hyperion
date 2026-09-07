@@ -1,481 +1,84 @@
 # Copyright (c) 2026 Reza Malik. Licensed under the Apache License, Version 2.0.
-"""MCP tool: plan_remediation
+"""MCP tool: plan_remediation — wired onto the Shape-C retrieval engine (S4).
 
-Given a security finding, plan the fix.  Returns ordered remediation
-steps, example secure code, verification procedures, related threats
-to check, priority assessment, and estimated effort.
+Council b420a9f0 / m-73ea1894; standard m-55f6d4da (settled — cite, do not
+re-litigate). The SEED-FROM-NODE member of the four-step template (the same shape
+Mnemos' ``suggest_refactor`` inherits): the caller already HOLDS a finding's
+identity, so retrieval is seeded from THAT threat vector's OWN signals
+(``kb.signal_ids_for`` -> ONE ``kb.hydrate``) — no signal-recognition step — and
+hydrate's one-hop fan-out expands over the vector's ``alternatives`` edge, so the
+related set IS the fan-out the corpus records.
+
+1. RESOLVE — a finding names its vector by ``threat_id`` (preferred) or by ``cwe``,
+   which maps to vector ids through the corpus-built ``kb.cwe_to_threat_ids`` bridge
+   (built from each vector's OWN ``cwe`` list, so it equals the S0-frozen mapping by
+   construction; one-to-many). A ``threat_id`` that is not a genuine, hydratable
+   corpus node, or a ``cwe`` the corpus does not cover (e.g. CWE-95 / CWE-352), is a
+   DANGLING reference — surfaced, never silently answered with a generic husk. This
+   REPLACES the dead ``get_remediation(cwe)`` bridge: the loader keys remediation on
+   ``threat_id`` (loader:get_remediation), so the old tool passed a CWE to a
+   threat-id lookup and got ``None`` every time, then fell back to the inline
+   remediation and generic-fallback islands — the whole reason for the retrofit.
+   Both islands are DELETED from this module's path.
+2. SEED + RETRIEVE — the resolved vectors' own signal ids drive ONE ``kb.hydrate``
+   call — the proven four-state, fail-closed envelope. The resolved vectors are the
+   top seeds (they own every seeded signal); hydrate's one-hop fan-out over
+   ``alternatives`` supplies the related threats.
+3. REASON — each remediation entry is built from its hydrated vector's OWN fields
+   (remediation / examples / detection_patterns, plus cwe / severity / owasp /
+   mitre_attack / attack_surface as data), never a hardcoded table. ``related_threats``
+   is the pure fan-out (the propagated-only neighbours). The tool surfaces each
+   vector's OWN severity AS DATA; it invents no priority/risk verdict (out of scope).
+4. ENVELOPE — the four states (hit / low_confidence / no_match / dangling) are
+   surfaced. A finding that references a vector absent/husk in the corpus, or a CWE
+   the corpus does not cover, is ``dangling`` (fail closed, never a generic husk);
+   a finding that references nothing resolvable is ``no_match``.
+
+The retired ``language`` / ``constraints`` params (which only ever selected content
+FROM the deleted islands — a language-keyed ``code_fix`` and constraint-adjusted
+``steps`` / ``effort``) have NO alias shim; the corpus carries one ``remediation``
+string and one ``examples`` pair per vector, and the language-agnostic corpus is the
+one source of truth. The substring matcher is deleted at zero callers, and the
+drifted server.py inline @mcp.tool copy now delegates to this filed body — no shim.
+Firewall: imports only hyperion.*.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from hyperion.tools._shared import coerce, emit_event, get_knowledge
+from hyperion.knowledge.loader import DANGLING, NO_MATCH
+from hyperion.tools._shared import (
+    _MAX_MATCHED_SIGNALS,
+    coerce,
+    emit_event,
+    get_knowledge,
+    project_node,
+)
 
-# ---------------------------------------------------------------------------
-# Remediation knowledge base -- indexed by threat pattern / CWE
-# ---------------------------------------------------------------------------
+# The fields a remediation entry surfaces from its hydrated vector — each vector's
+# OWN data (no table). ``remediation`` / ``examples`` / ``detection_patterns`` are
+# the north-star content; the rest ride along as data (the vector's own severity,
+# never an invented verdict). A field the vector does not carry is simply omitted.
+_REMEDIATION_FIELDS: tuple[str, ...] = (
+    "id", "name", "category", "severity", "cwe", "owasp", "mitre_attack",
+    "attack_surface", "description", "remediation", "examples", "detection_patterns",
+)
+# The compact fields a related (fan-out) threat surfaces — enough to decide whether
+# to pull its full remediation next, without re-emitting every field.
+_RELATED_FIELDS: tuple[str, ...] = (
+    "id", "name", "category", "severity", "cwe", "remediation",
+)
 
-_REMEDIATIONS: dict[str, dict[str, Any]] = {
-    "CWE-78": {
-        "title": "OS Command Injection",
-        "steps": [
-            "Identify all locations where user input reaches system command execution",
-            "Replace os.system() / subprocess shell=True with subprocess.run() using argument lists",
-            "Implement input validation with allowlisted characters",
-            "Add input length limits to prevent buffer-based attacks",
-            "Apply least-privilege: run commands with minimal permissions",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# os.system(f'grep {user_input} /var/log/app.log')\n"
-                "\n"
-                "# SECURE:\n"
-                "import subprocess\n"
-                "import shlex\n"
-                "\n"
-                "def safe_grep(pattern: str, logfile: str) -> str:\n"
-                "    # Validate input\n"
-                "    if not pattern.isalnum():\n"
-                "        raise ValueError('Pattern must be alphanumeric')\n"
-                "    result = subprocess.run(\n"
-                "        ['grep', '--', pattern, logfile],\n"
-                "        capture_output=True, text=True, timeout=30,\n"
-                "    )\n"
-                "    return result.stdout\n"
-            ),
-            "javascript": (
-                "// INSECURE:\n"
-                "// exec(`grep ${userInput} /var/log/app.log`)\n"
-                "\n"
-                "// SECURE:\n"
-                "const { execFile } = require('child_process');\n"
-                "\n"
-                "function safeGrep(pattern, logfile) {\n"
-                "  if (!/^[a-zA-Z0-9]+$/.test(pattern)) {\n"
-                "    throw new Error('Pattern must be alphanumeric');\n"
-                "  }\n"
-                "  return execFile('grep', ['--', pattern, logfile]);\n"
-                "}\n"
-            ),
-        },
-        "verification": [
-            "Run with known malicious inputs: `; rm -rf /`, `$(whoami)`, `| cat /etc/passwd`",
-            "Verify subprocess.run uses shell=False (the default)",
-            "Check that no user input reaches shell interpretation",
-            "Run a SAST tool to confirm no command injection paths remain",
-        ],
-        "related_threats": ["CWE-77", "CWE-88"],
-        "effort": "medium",
-    },
-    "CWE-89": {
-        "title": "SQL Injection",
-        "steps": [
-            "Identify all SQL queries that incorporate user input",
-            "Replace string formatting/concatenation with parameterized queries",
-            "Use ORM methods where available instead of raw SQL",
-            "Implement input validation as defense-in-depth",
-            "Add WAF rules to detect SQL injection attempts",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# cursor.execute(f\"SELECT * FROM users WHERE id = {user_id}\")\n"
-                "\n"
-                "# SECURE:\n"
-                "cursor.execute(\n"
-                "    'SELECT * FROM users WHERE id = %s',\n"
-                "    (user_id,)\n"
-                ")\n"
-                "\n"
-                "# Or with SQLAlchemy:\n"
-                "from sqlalchemy import text\n"
-                "result = session.execute(\n"
-                "    text('SELECT * FROM users WHERE id = :uid'),\n"
-                "    {'uid': user_id}\n"
-                ")\n"
-            ),
-            "javascript": (
-                "// INSECURE:\n"
-                "// db.query(`SELECT * FROM users WHERE id = ${userId}`);\n"
-                "\n"
-                "// SECURE:\n"
-                "db.query('SELECT * FROM users WHERE id = $1', [userId]);\n"
-            ),
-        },
-        "verification": [
-            "Test with SQL injection payloads: `' OR '1'='1`, `'; DROP TABLE users;--`",
-            "Verify all queries use parameterized placeholders",
-            "Run SQLMap or similar tool against the endpoints",
-            "Review ORM usage for raw query escape hatches",
-        ],
-        "related_threats": ["CWE-564", "CWE-943"],
-        "effort": "low",
-    },
-    "CWE-79": {
-        "title": "Cross-Site Scripting (XSS)",
-        "steps": [
-            "Identify all locations where user input is rendered in HTML",
-            "Apply context-appropriate output encoding (HTML, JS, URL, CSS)",
-            "Use framework auto-escaping (Jinja2, React JSX, etc.)",
-            "Implement Content-Security-Policy headers",
-            "Sanitize rich text with a library like DOMPurify or bleach",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE (Jinja2 with autoescape off):\n"
-                "# return f'<div>{user_input}</div>'\n"
-                "\n"
-                "# SECURE:\n"
-                "from markupsafe import escape\n"
-                "return f'<div>{escape(user_input)}</div>'\n"
-                "\n"
-                "# Or ensure Jinja2 autoescape is on:\n"
-                "# Environment(autoescape=True)\n"
-            ),
-            "javascript": (
-                "// INSECURE:\n"
-                "// element.innerHTML = userInput;\n"
-                "\n"
-                "// SECURE:\n"
-                "element.textContent = userInput;\n"
-                "\n"
-                "// If HTML is needed, sanitize first:\n"
-                "import DOMPurify from 'dompurify';\n"
-                "element.innerHTML = DOMPurify.sanitize(userInput);\n"
-            ),
-        },
-        "verification": [
-            "Test with XSS payloads: `<script>alert(1)</script>`, `<img onerror=alert(1) src=x>`",
-            "Verify Content-Security-Policy header blocks inline scripts",
-            "Check that autoescape is enabled in template engines",
-            "Run a browser-based XSS scanner against the application",
-        ],
-        "related_threats": ["CWE-80", "CWE-87"],
-        "effort": "medium",
-    },
-    "CWE-95": {
-        "title": "Code Injection (eval/exec)",
-        "steps": [
-            "Remove all uses of eval() and exec() on user-controlled input",
-            "Replace eval() with ast.literal_eval() for safe data parsing",
-            "Use structured dispatch (dict lookup) instead of dynamic execution",
-            "If dynamic evaluation is unavoidable, use a sandboxed environment",
-            "Audit all code paths that lead to eval/exec",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# result = eval(user_expression)\n"
-                "\n"
-                "# SECURE (for data parsing):\n"
-                "import ast\n"
-                "result = ast.literal_eval(user_expression)\n"
-                "\n"
-                "# SECURE (for dispatch):\n"
-                "OPERATIONS = {\n"
-                "    'add': lambda a, b: a + b,\n"
-                "    'mul': lambda a, b: a * b,\n"
-                "}\n"
-                "op = OPERATIONS.get(user_op)\n"
-                "if op is None:\n"
-                "    raise ValueError(f'Unknown operation: {user_op}')\n"
-                "result = op(a, b)\n"
-            ),
-            "javascript": (
-                "// INSECURE:\n"
-                "// const result = eval(userExpression);\n"
-                "\n"
-                "// SECURE (for JSON parsing):\n"
-                "const result = JSON.parse(userExpression);\n"
-                "\n"
-                "// SECURE (for dispatch):\n"
-                "const operations = {\n"
-                "  add: (a, b) => a + b,\n"
-                "  mul: (a, b) => a * b,\n"
-                "};\n"
-                "const op = operations[userOp];\n"
-                "if (!op) throw new Error(`Unknown operation: ${userOp}`);\n"
-                "const result = op(a, b);\n"
-            ),
-        },
-        "verification": [
-            "Verify no eval/exec calls remain on user-controlled paths",
-            "Test with code injection payloads: `__import__('os').system('id')`",
-            "Run SAST to detect remaining eval/exec usage",
-            "Review all dynamic import and reflection patterns",
-        ],
-        "related_threats": ["CWE-94", "CWE-96"],
-        "effort": "medium",
-    },
-    "CWE-798": {
-        "title": "Hardcoded Credentials",
-        "steps": [
-            "Identify all hardcoded secrets in the codebase",
-            "Move secrets to environment variables or a secrets manager",
-            "Rotate all exposed credentials immediately",
-            "Add secret scanning to the CI/CD pipeline (e.g. git-secrets, trufflehog)",
-            "Update .gitignore to exclude config files that may contain secrets",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# API_KEY = 'sk-abc123def456'\n"
-                "\n"
-                "# SECURE:\n"
-                "import os\n"
-                "\n"
-                "API_KEY = os.environ['API_KEY']\n"
-                "\n"
-                "# Or with a secrets manager:\n"
-                "# from my_secrets import get_secret\n"
-                "# API_KEY = get_secret('api-key')\n"
-            ),
-            "javascript": (
-                "// INSECURE:\n"
-                "// const API_KEY = 'sk-abc123def456';\n"
-                "\n"
-                "// SECURE:\n"
-                "const API_KEY = process.env.API_KEY;\n"
-                "if (!API_KEY) throw new Error('API_KEY not set');\n"
-            ),
-        },
-        "verification": [
-            "Run trufflehog or git-secrets against the entire repo history",
-            "Verify all secrets load from environment or secrets manager",
-            "Confirm rotated credentials work in all environments",
-            "Check CI/CD pipeline has secret scanning enabled",
-        ],
-        "related_threats": ["CWE-321", "CWE-259"],
-        "effort": "low",
-    },
-    "CWE-502": {
-        "title": "Deserialization of Untrusted Data",
-        "steps": [
-            "Replace pickle/marshal with JSON or msgpack for data interchange",
-            "If pickle is required, never unpickle data from untrusted sources",
-            "Implement allowlist-based deserialization (RestrictedUnpickler)",
-            "Add integrity checks (HMAC) to serialized data",
-            "Use yaml.safe_load() instead of yaml.load()",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# data = pickle.loads(untrusted_bytes)\n"
-                "\n"
-                "# SECURE:\n"
-                "import json\n"
-                "data = json.loads(untrusted_bytes)\n"
-                "\n"
-                "# If complex objects needed, use a schema:\n"
-                "import pydantic\n"
-                "\n"
-                "class SafeData(pydantic.BaseModel):\n"
-                "    name: str\n"
-                "    value: int\n"
-                "\n"
-                "data = SafeData.model_validate_json(untrusted_bytes)\n"
-            ),
-        },
-        "verification": [
-            "Verify no pickle.loads/marshal.loads on untrusted data",
-            "Test with crafted pickle payloads that execute code",
-            "Confirm yaml.safe_load is used everywhere",
-            "Check that HMAC validation occurs before deserialization",
-        ],
-        "related_threats": ["CWE-915"],
-        "effort": "medium",
-    },
-    "CWE-327": {
-        "title": "Broken Cryptography",
-        "steps": [
-            "Replace deprecated algorithms (MD5, SHA-1, DES, 3DES, RC4)",
-            "Use AES-256-GCM or ChaCha20-Poly1305 for symmetric encryption",
-            "Use bcrypt, argon2, or scrypt for password hashing",
-            "Ensure RSA keys are at least 2048 bits",
-            "Use authenticated encryption (GCM) instead of unauthenticated modes",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# import hashlib\n"
-                "# hashed = hashlib.md5(password.encode()).hexdigest()\n"
-                "\n"
-                "# SECURE (password hashing):\n"
-                "import bcrypt\n"
-                "hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt())\n"
-                "\n"
-                "# SECURE (data integrity):\n"
-                "import hashlib\n"
-                "digest = hashlib.sha256(data).hexdigest()\n"
-            ),
-        },
-        "verification": [
-            "Verify no MD5/SHA-1 usage for security-critical operations",
-            "Confirm passwords are hashed with bcrypt/argon2/scrypt",
-            "Check AES mode is GCM or CBC-with-HMAC, not ECB",
-            "Verify RSA key sizes are >= 2048 bits",
-        ],
-        "related_threats": ["CWE-328", "CWE-326", "CWE-338"],
-        "effort": "medium",
-    },
-    "CWE-352": {
-        "title": "Cross-Site Request Forgery (CSRF)",
-        "steps": [
-            "Enable CSRF protection in the web framework",
-            "Include CSRF tokens in all state-changing forms",
-            "Validate the Origin/Referer header on the server",
-            "Use SameSite cookie attribute (Strict or Lax)",
-            "Implement double-submit cookie pattern as fallback",
-        ],
-        "code_fixes": {
-            "python": (
-                "# Flask example -- enable CSRF:\n"
-                "from flask_wtf.csrf import CSRFProtect\n"
-                "\n"
-                "csrf = CSRFProtect(app)\n"
-                "\n"
-                "# In templates:\n"
-                "# <form method='POST'>\n"
-                "#   {{ csrf_token() }}\n"
-                "#   ...\n"
-                "# </form>\n"
-            ),
-        },
-        "verification": [
-            "Verify CSRF tokens are present in all state-changing forms",
-            "Test form submission without CSRF token (should fail)",
-            "Check SameSite cookie attribute is set",
-            "Run Burp Suite CSRF scanner against the application",
-        ],
-        "related_threats": ["CWE-346"],
-        "effort": "low",
-    },
-    "CWE-295": {
-        "title": "Certificate Validation Bypass",
-        "steps": [
-            "Remove all verify=False / SSL_VERIFY=False settings",
-            "Fix the root cause: update expired certificates, add correct CA",
-            "Use certificate pinning for critical connections",
-            "Configure proper CA bundle paths",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# requests.get(url, verify=False)\n"
-                "\n"
-                "# SECURE:\n"
-                "import requests\n"
-                "\n"
-                "# Default verify=True uses system CA bundle\n"
-                "response = requests.get(url)\n"
-                "\n"
-                "# Or specify a custom CA bundle:\n"
-                "response = requests.get(url, verify='/path/to/ca-bundle.crt')\n"
-            ),
-        },
-        "verification": [
-            "Verify no verify=False remains in the codebase",
-            "Test connections with invalid certificates (should fail)",
-            "Check that the CA bundle is up to date",
-            "Run sslyze or testssl.sh against your endpoints",
-        ],
-        "related_threats": ["CWE-297"],
-        "effort": "low",
-    },
-    "CWE-74": {
-        "title": "Prompt Injection (Agent/LLM)",
-        "steps": [
-            "Implement strict input sanitization before including user content in prompts",
-            "Use instruction hierarchy: system instructions always override user input",
-            "Add output validation to detect and block injection artifacts",
-            "Implement prompt templates with clear boundary markers",
-            "Use separate LLM calls for untrusted content processing",
-            "Monitor for prompt injection patterns in logs",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# prompt = f'You are a helper. User says: {user_input}'\n"
-                "\n"
-                "# SECURE:\n"
-                "def build_prompt(system_instructions: str, user_input: str) -> list:\n"
-                "    # Sanitize user input\n"
-                "    sanitized = user_input.replace('\\n', ' ').strip()\n"
-                "    if len(sanitized) > MAX_INPUT_LENGTH:\n"
-                "        sanitized = sanitized[:MAX_INPUT_LENGTH]\n"
-                "\n"
-                "    return [\n"
-                "        {'role': 'system', 'content': system_instructions},\n"
-                "        {'role': 'user', 'content': sanitized},\n"
-                "    ]\n"
-            ),
-        },
-        "verification": [
-            "Test with known prompt injection payloads",
-            "Verify system instructions cannot be overridden by user input",
-            "Check that output filtering catches injection artifacts",
-            "Review all prompt construction paths for input boundaries",
-        ],
-        "related_threats": ["CWE-77", "CWE-20"],
-        "effort": "high",
-    },
-    "CWE-400": {
-        "title": "Resource Exhaustion",
-        "steps": [
-            "Set token/cost budgets for all LLM calls",
-            "Implement request rate limiting",
-            "Add timeout limits to all external calls",
-            "Monitor resource usage and set alerts",
-            "Implement circuit breakers for cascading failure prevention",
-        ],
-        "code_fixes": {
-            "python": (
-                "# INSECURE:\n"
-                "# response = client.chat(model='gpt-4', max_tokens=None)\n"
-                "\n"
-                "# SECURE:\n"
-                "response = client.chat(\n"
-                "    model='gpt-4',\n"
-                "    max_tokens=4096,\n"
-                "    timeout=30,\n"
-                ")\n"
-            ),
-        },
-        "verification": [
-            "Verify token limits are set on all LLM calls",
-            "Test with large inputs to confirm truncation works",
-            "Check rate limiting is active and tested",
-            "Verify timeout handling is graceful",
-        ],
-        "related_threats": ["CWE-770", "CWE-799"],
-        "effort": "low",
-    },
-}
-
-# Fallback for CWEs not in the detailed database
-_GENERIC_REMEDIATION: dict[str, Any] = {
-    "title": "Security Vulnerability",
-    "steps": [
-        "Identify the root cause of the vulnerability",
-        "Review the CWE entry for detailed mitigation guidance",
-        "Apply the principle of least privilege",
-        "Implement input validation and output encoding",
-        "Add automated security testing to the CI/CD pipeline",
-    ],
-    "verification": [
-        "Run security-focused tests against the fix",
-        "Perform code review with security focus",
-        "Verify with SAST/DAST tools",
-    ],
-    "related_threats": [],
-    "effort": "medium",
-}
 
 # ---------------------------------------------------------------------------
 # Priority calculation
 # ---------------------------------------------------------------------------
+# OUT OF SCOPE (S4): this per-CWE priority island invents a risk verdict, which the
+# retrofit's tool no longer emits (it surfaces each vector's OWN severity as data).
+# The story leaves the island byte-untouched and records its deletion/reconciliation
+# as a follow-up — it is a SEPARATE hardcoded island the arc has not yet folded onto
+# the corpus, not named by S4's AC. Retained here, dead, until that follow-up.
 
 _SEVERITY_PRIORITY: dict[str, int] = {
     "critical": 1,
@@ -519,135 +122,184 @@ def _compute_priority(severity: str, cwe: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Finding -> genuine corpus threat ids
+# ---------------------------------------------------------------------------
+
+def _cwe_values(finding: dict) -> list[str]:
+    """Normalise a finding's ``cwe`` (str or list) to a clean list of CWE ids."""
+    raw = finding.get("cwe")
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if isinstance(raw, list):
+        return [c.strip() for c in raw if isinstance(c, str) and c.strip()]
+    return []
+
+
+def _resolve_finding(
+    kb: Any, threat_id: str, cwe_values: list[str],
+) -> tuple[list[str], list[str], str]:
+    """Resolve a finding to genuine, hydratable corpus threat ids (fail closed).
+
+    Returns ``(resolved_ids, dangling_refs, source)``:
+
+    * an explicit ``threat_id`` takes precedence; if it is not a genuine, hydratable
+      corpus node it is a DANGLING reference (never a generic husk), and there is NO
+      silent fall-back to the cwe — a broken finding fails closed loud;
+    * otherwise each ``cwe`` maps through the corpus-built ``cwe_to_threat_ids``
+      bridge; a cwe the corpus does not cover (CWE-95 / CWE-352) is a DANGLING
+      reference — the coverage gap, recorded (corpus authoring is out of the arc).
+
+    Hydratability is proven by ``signal_ids_for`` returning ids: that holds only for a
+    node present in the signal index with its own signals — the exact precondition the
+    seed-from-node hydrate needs — so a present-but-signal-less husk also dangles.
+    """
+    if threat_id:
+        if kb.signal_ids_for(threat_id):
+            return [threat_id], [], "threat_id"
+        return [], [threat_id], "threat_id"
+
+    # Bound the UNTRUSTED cwe list at the caller boundary, BEFORE the per-cwe cost
+    # loop and the per-vector ``signal_ids_for`` loop it feeds — mirroring the sibling
+    # ``assess_threat``, which caps its untrusted id list before the hydrate loop.
+    # Dedup FIRST (a repeated cwe adds no coverage) so a legitimate multi-CWE finding
+    # still hydrates every DISTINCT mapped vector, then cap the distinct set at the
+    # shared ceiling. Without this a repeated/oversized cwe list amplifies linearly
+    # into the seed loop (a CWE-400 resource-consumption path).
+    distinct_cwes = list(dict.fromkeys(cwe_values))[:_MAX_MATCHED_SIGNALS]
+
+    resolved: list[str] = []
+    dangling: list[str] = []
+    cwe_map = kb.cwe_to_threat_ids()
+    for cwe in distinct_cwes:
+        tids = cwe_map.get(cwe, [])
+        if tids:
+            resolved.extend(tids)
+        else:
+            dangling.append(cwe)
+    # Distinct threat ids only: two CWEs can map to the same vector (a vector carries
+    # a cwe LIST), so dedup — and re-apply the ceiling to the resolved set — before the
+    # seed loop calls ``signal_ids_for`` once per vector. Work is now bounded by the
+    # ceiling and the corpus, never by the caller's input length.
+    resolved = list(dict.fromkeys(resolved))[:_MAX_MATCHED_SIGNALS]
+    return resolved, dangling, ("cwe" if cwe_values else "none")
+
+
+# ---------------------------------------------------------------------------
 # Main tool
 # ---------------------------------------------------------------------------
 
 def plan_remediation(
     finding: dict,
-    language: str = "python",
-    constraints: dict | None = None,
+    k: int = 10,
     conn: object = None,
 ) -> dict:
-    """Plan remediation for a security finding.
+    """Plan the fix for a security finding, hydrated from the threat_vectors corpus.
+
+    SEED-FROM-NODE: the finding names its vector (``threat_id`` preferred, else
+    ``cwe`` via ``kb.cwe_to_threat_ids``); retrieval is seeded from that vector's OWN
+    signals (``kb.signal_ids_for`` -> ``kb.hydrate``), whose one-hop fan-out over
+    ``alternatives`` supplies the related threats — the caller passes no signal ids.
 
     Args:
-        finding: Dict with keys:
-            - ``threat_id`` (str): Identifier for the threat.
-            - ``severity`` (str): "critical", "high", "medium", "low".
-            - ``code_context`` (str): The vulnerable code snippet.
-            - ``description`` (str): Description of the vulnerability.
-            - ``cwe`` (str): CWE identifier (e.g. "CWE-89").
-            - ``pattern`` (str): Detection pattern that matched.
-        language: Programming language for code fix examples.
-        constraints: Optional dict with keys like ``timeline``
-            ("immediate"/"sprint"/"quarter"), ``team_size`` (int),
-            ``breaking_changes_ok`` (bool).
-        conn: Kuzu/LadybugDB connection for graph mode, or None for JSON.
+        finding: Dict identifying the vulnerability. ``threat_id`` (str, a corpus
+            vector id) is the preferred key; ``cwe`` (str or list) is the fallback,
+            mapped to vector ids through the corpus-built bridge. ``severity`` /
+            ``description`` / ``code_context`` are echoed context only. A ``threat_id``
+            absent/husk in the corpus, or a ``cwe`` the corpus does not cover, yields a
+            DANGLING envelope — never a generic husk.
+        k: Number of ranked results (engine-clamped to 1..50).
+        conn: Kuzu/LadybugDB connection for graph mode, or None for the JSON
+            singleton (both loaders share one engine).
 
     Returns:
-        Dict with keys: remediation_steps, code_fix, verification,
-        related_threats, priority, estimated_effort.
+        ``remediations`` (each resolved vector's OWN remediation / examples /
+        detection_patterns + its data fields) / ``related_threats`` (the fan-out) /
+        ``retrieval_state`` / ``unmatched`` / ``dangling`` / ``source``. Fail-closed:
+        an abstaining envelope returns empty lists, never a husk.
     """
     finding = coerce(finding, dict) or {}
-    constraints = coerce(constraints, dict) or {}
-
-    threat_id = finding.get("threat_id", "unknown")
-    severity = finding.get("severity", "medium").lower()
-    cwe = finding.get("cwe", "")
-    description = finding.get("description", "")
-    code_context = finding.get("code_context", "")
-    pattern = finding.get("pattern", "")
-
-    # Look up remediation by CWE
-    remediation_data = _REMEDIATIONS.get(cwe, _GENERIC_REMEDIATION)
-
-    # Try knowledge base for additional guidance
-    kb_guidance: dict[str, Any] = {}
     try:
-        kb = get_knowledge(conn)
-        if hasattr(kb, "get_remediation"):
-            kb_guidance = kb.get_remediation(cwe) or {}
-    except Exception:
-        pass
+        k = int(k)
+    except (TypeError, ValueError):
+        k = 10
 
-    # Build remediation steps
-    steps = list(remediation_data.get("steps", _GENERIC_REMEDIATION["steps"]))
+    threat_id = finding.get("threat_id")
+    threat_id = threat_id.strip() if isinstance(threat_id, str) else ""
+    cwe_values = _cwe_values(finding)
 
-    # Add KB-sourced steps if available
-    if kb_guidance.get("additional_steps"):
-        steps.extend(kb_guidance["additional_steps"])
+    kb = get_knowledge(conn)
 
-    # Add constraint-aware steps
-    if constraints.get("breaking_changes_ok") is False:
-        steps.insert(0, "Ensure fix is backward-compatible -- no breaking changes allowed")
+    # 1. RESOLVE the finding to genuine, hydratable corpus vector ids.
+    resolved, dangling_refs, source = _resolve_finding(kb, threat_id, cwe_values)
 
-    if constraints.get("timeline") == "immediate":
-        steps.insert(0, "IMMEDIATE: Apply hotfix/WAF rule as temporary mitigation before full fix")
+    # Fail closed when nothing resolves: a referenced-but-unresolvable finding
+    # (bad threat_id, or an uncovered cwe) is DANGLING; a finding that references
+    # nothing resolvable is NO_MATCH. Never a silent generic husk.
+    if not resolved:
+        state = DANGLING if dangling_refs else NO_MATCH
+        result = {
+            "remediations": [],
+            "related_threats": [],
+            "retrieval_state": state,
+            "unmatched": [],
+            "dangling": sorted(dangling_refs),
+            "source": source,
+        }
+        emit_event("plan_remediation", {
+            "threat_id": threat_id,
+            "cwe": cwe_values,
+            "source": source,
+            "state": state,
+            "remediations_count": 0,
+            "related_count": 0,
+        })
+        return result
 
-    # Get language-specific code fix
-    code_fixes = remediation_data.get("code_fixes", {})
-    lang_key = language.lower()
-    if lang_key in ("py",):
-        lang_key = "python"
-    elif lang_key in ("js", "ts", "typescript"):
-        lang_key = "javascript"
+    # 2. SEED + RETRIEVE — one hydrate over the resolved vectors' OWN signals. The
+    #    untrusted finding input was already bounded at the RESOLVE step (the cwe list
+    #    deduped + capped), and ``resolved`` is distinct + capped, so ``signal_ids_for``
+    #    runs once per corpus vector — not once per caller-supplied cwe. The seed ids
+    #    are capped again under the same ceiling before hydrate (which bounds its own
+    #    fan-out downstream). The resolved vectors own every seeded signal, so they are
+    #    the top seeds; their one-hop fan-out over ``alternatives`` is the related set.
+    seed_signal_ids = sorted({
+        sid for tid in resolved for sid in kb.signal_ids_for(tid)
+    })
+    res = kb.hydrate(seed_signal_ids[:_MAX_MATCHED_SIGNALS], k=k)
 
-    code_fix = code_fixes.get(lang_key, code_fixes.get("python", ""))
+    # 3. REASON — remediations from each resolved vector's OWN fields; related_threats
+    #    from the pure fan-out (propagated-only neighbours = the ``alternatives`` edge).
+    resolved_set = set(resolved)
+    remediations = [
+        project_node(p, _REMEDIATION_FIELDS)
+        for p in res.patterns if p["id"] in resolved_set
+    ]
+    related_threats = [
+        project_node(p, _RELATED_FIELDS)
+        for p in res.patterns if p["retrieval"]["seed"] is False
+    ]
 
-    # Add KB code fix if available
-    if kb_guidance.get("code_fix"):
-        code_fix = kb_guidance["code_fix"]
+    # 4. ENVELOPE — surface the fail-closed state + integrity signals. The resolved
+    #    ids are genuine and hydratable, so hydrate does not abstain over them; any
+    #    dangling fan-out id the engine flagged is merged with the unresolved refs.
+    dangling = sorted(set(res.dangling) | set(dangling_refs))
 
-    # Verification steps
-    verification = list(
-        remediation_data.get("verification", _GENERIC_REMEDIATION["verification"])
-    )
-    if kb_guidance.get("verification"):
-        verification.extend(kb_guidance["verification"])
-
-    # Related threats
-    related = list(
-        remediation_data.get("related_threats", [])
-    )
-    if kb_guidance.get("related_threats"):
-        related.extend(kb_guidance["related_threats"])
-    # Deduplicate
-    related = list(dict.fromkeys(related))
-
-    # Priority
-    priority = _compute_priority(severity, cwe)
-
-    # Estimated effort
-    base_effort = remediation_data.get("effort", "medium")
-    team_size = constraints.get("team_size", 1)
-    if team_size >= 3 and base_effort == "high":
-        estimated_effort = "medium"
-    elif team_size <= 1 and base_effort == "low":
-        estimated_effort = "low"
-    else:
-        estimated_effort = base_effort
-
-    result: dict[str, Any] = {
-        "threat_id": threat_id,
-        "title": remediation_data.get("title", description),
-        "cwe": cwe,
-        "remediation_steps": steps,
-        "code_fix": code_fix,
-        "verification": verification,
-        "related_threats": related,
-        "priority": priority,
-        "estimated_effort": estimated_effort,
+    result = {
+        "remediations": remediations,
+        "related_threats": related_threats,
+        "retrieval_state": res.state,
+        "unmatched": sorted(res.unmatched_signals),
+        "dangling": dangling,
+        "source": source,
     }
-
-    if code_context:
-        result["original_code_context"] = code_context
 
     emit_event("plan_remediation", {
         "threat_id": threat_id,
-        "severity": severity,
-        "cwe": cwe,
-        "priority": priority["priority_label"],
-        "effort": estimated_effort,
+        "cwe": cwe_values,
+        "source": source,
+        "state": res.state,
+        "remediations_count": len(remediations),
+        "related_count": len(related_threats),
     })
 
     return result

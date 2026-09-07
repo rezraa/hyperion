@@ -28,3 +28,6 @@ Thumbs.db
 
 # MCP config (local paths)
 .mcp.json
+
+# Internal build artifacts (migration proofs, etc.)
+docs/

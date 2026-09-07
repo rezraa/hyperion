@@ -404,6 +404,21 @@ def _get_patterns(language: str) -> list[tuple[str, str, str, str, str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Scan ceiling -- bounded brute-force over UNTRUSTED code (CWE-400 bulkhead)
+# ---------------------------------------------------------------------------
+# scan_code runs one re.search per (pattern, line) over attacker-controlled ``code``;
+# total work is patterns x lines x line-length. Both the line count and the per-line
+# length come from untrusted input, so the product is unbounded without a named
+# ceiling. These bound each untrusted factor where the per-(pattern x line) cost is
+# incurred -- applied INSIDE scan_code as the untrusted ``code`` is read, before the
+# scan loop. A code SCANNER is meant for snippets, not whole repositories: beyond
+# these bounds the scan is truncated (``lines_scanned`` reports the real scanned
+# count) so the work can never grow with hostile input.
+_MAX_SCAN_LINES = 20_000       # max lines scanned from untrusted ``code``
+_MAX_LINE_LENGTH = 4_000       # max chars per line fed to re.search
+
+
+# ---------------------------------------------------------------------------
 # Line context extraction
 # ---------------------------------------------------------------------------
 
@@ -472,6 +487,48 @@ def _has_agent_signals(code: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Corpus source-vector enrichment (S5, mid-story council REVISE path (a))
+# ---------------------------------------------------------------------------
+# The fields a finding surfaces from its SOURCE threat vector — each vector's OWN
+# data (no hardcoded table). name / severity / remediation are the north-star
+# content; cwe rides along so a caller can confirm the mapping; id identifies which
+# vector. A field the vector does not carry is simply omitted.
+_SOURCE_VECTOR_FIELDS: tuple[str, ...] = (
+    "id", "name", "severity", "cwe", "remediation",
+)
+
+
+def _source_vectors(
+    kb: Any, cwe_map: dict[str, list[str]], cwe: str,
+) -> list[dict[str, Any]]:
+    """Project the corpus vector(s) a finding's CWE maps to onto their OWN fields.
+
+    The S5 enrichment bridge: a finding's CWE resolves through the S4
+    ``cwe_to_threat_ids`` mapping to its SOURCE threat vector(s); each is surfaced as
+    its OWN name / severity / remediation / cwe (never a hardcoded table),
+    deterministically ordered by the mapping's sorted ids. This is a direct
+    seed-from-a-known-id lookup, NOT signal recognition — scan_code has no caller
+    signals and stays a code scanner. A CWE the corpus does not cover (e.g. CWE-95)
+    yields ``[]`` — the recorded coverage gap (corpus authoring is out of the arc),
+    fail-open, never a fabricated husk. Copies each list value so the shared
+    singleton corpus is never aliased by the tool's mutable output.
+    """
+    if not kb or not cwe:
+        return []
+    out: list[dict[str, Any]] = []
+    for tid in cwe_map.get(cwe, []):
+        vec = kb.get_threat(tid)
+        if vec is None:
+            continue
+        out.append({
+            f: (list(vec[f]) if isinstance(vec.get(f), list) else vec[f])
+            for f in _SOURCE_VECTOR_FIELDS
+            if vec.get(f) is not None
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Main tool
 # ---------------------------------------------------------------------------
 
@@ -499,8 +556,11 @@ def scan_code(
     """
     context = coerce(context, str)
 
-    lines = code.splitlines()
     patterns = _get_patterns(language)
+    # Bound the untrusted input where the patterns x lines cost is incurred (CWE-400):
+    # cap the scanned line count and truncate each line before the scan loop below, so
+    # the product patterns x lines x chars can never grow with hostile ``code``.
+    lines = [ln[:_MAX_LINE_LENGTH] for ln in code.splitlines()[:_MAX_SCAN_LINES]]
 
     findings: list[dict[str, Any]] = []
     seen: set[str] = set()  # deduplicate: (pattern_name, line_number)
@@ -574,54 +634,33 @@ def scan_code(
 
     risk_score = _compute_risk_score(findings)
 
-    # Try to enrich with knowledge base patterns if available
-    kb_enrichments: list[dict[str, Any]] = []
+    # Enrich each finding with its SOURCE vector(s) from the corpus (S5, mid-story
+    # council REVISE path (a)). The CURATED regex island above stays the SOLE
+    # detector — the finding SET is unchanged; each finding is only DECORATED with
+    # the corpus vector(s) its CWE maps to, so the corpus content (each vector's OWN
+    # name / severity / remediation) reaches the scanner's output. This REPLACES the
+    # dead ``get_detection_patterns(LANGUAGE)`` bridge: the loader keys
+    # detection_patterns on threat_id, so language lookups returned 0/316 reachable —
+    # and materialising those 316 patterns AS detectors floods 60 corpus-authoring
+    # false positives (secure examples 62/65 fire), so it is DEFERRED behind a
+    # corpus-authoring prerequisite epic. No corpus regex is admitted as a detector,
+    # so ``patterns_checked`` stays the true island count and summary / risk_score
+    # (computed above) are final.
+    #
+    # Bounded by the scan ceiling above: the fan-out per CWE is corpus-fixed (a small,
+    # constant set of vectors), and the loop is over the island's OWN findings, whose
+    # count is bounded by the _MAX_SCAN_LINES x patterns scan above -- so the enrichment
+    # reads no unbounded input. Best-effort: if the knowledge base is unavailable the
+    # findings stay undecorated (empty ``source_vectors``); the island detector ran.
+    kb = None
+    cwe_map: dict[str, list[str]] = {}
     try:
         kb = get_knowledge(conn)
-        if hasattr(kb, "get_detection_patterns"):
-            kb_patterns = kb.get_detection_patterns(language)
-            for kbp in kb_patterns:
-                kb_regex = kbp.get("pattern", "")
-                if not kb_regex:
-                    continue
-                try:
-                    compiled = re.compile(kb_regex)
-                except re.error:
-                    continue
-
-                for line_idx, line in enumerate(lines):
-                    match = compiled.search(line)
-                    if match:
-                        dedup_key = f"kb:{kbp.get('id', kb_regex)}:{line_idx}"
-                        if dedup_key in seen:
-                            continue
-                        seen.add(dedup_key)
-
-                        enrichment: dict[str, Any] = {
-                            "pattern": kbp.get("id", "kb_pattern"),
-                            "severity": kbp.get("severity", "medium"),
-                            "cwe": kbp.get("cwe", ""),
-                            "description": kbp.get("description", ""),
-                            "remediation": kbp.get("remediation", ""),
-                            "line_number": line_idx + 1,
-                            "matched_text": match.group(0),
-                            "line_content": line.rstrip(),
-                            "context_lines": _get_line_context(lines, line_idx),
-                            "source": "knowledge_base",
-                        }
-                        kb_enrichments.append(enrichment)
-                        findings.append(enrichment)
-
-        # Recompute after enrichment
-        if kb_enrichments:
-            summary = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            for f in findings:
-                sev = f["severity"]
-                if sev in summary:
-                    summary[sev] += 1
-            risk_score = _compute_risk_score(findings)
+        cwe_map = kb.cwe_to_threat_ids()
     except Exception:
-        pass  # knowledge base not available -- that's fine
+        kb, cwe_map = None, {}
+    for f in findings:
+        f["source_vectors"] = _source_vectors(kb, cwe_map, f.get("cwe", ""))
 
     # Sort findings by severity (critical first)
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -638,9 +677,6 @@ def scan_code(
     if agent_threats:
         result["agent_threats"] = agent_threats
         result["agent_code_detected"] = True
-
-    if kb_enrichments:
-        result["kb_enrichments_count"] = len(kb_enrichments)
 
     emit_event("scan_code", {
         "language": language,

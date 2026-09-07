@@ -5,20 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperion.server import _CWE_DB, _SCAN_PATTERNS, _findings_log
-
-
-@pytest.fixture()
-def knowledge():
-    """Provide access to Hyperion's knowledge base for testing.
-
-    Returns a dict with the CWE database and scan patterns.
-    Standalone mode (no graph connection).
-    """
-    return {
-        "cwe_db": _CWE_DB,
-        "scan_patterns": _SCAN_PATTERNS,
-    }
+from hyperion.server import _findings_log
 
 
 @pytest.fixture(autouse=True)
