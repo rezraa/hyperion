@@ -37,7 +37,6 @@ from hyperion.knowledge.loader import KnowledgeLoader
 from hyperion.tools.assess_threat import assess_threat as filed_assess_threat
 from hyperion.tools.get_signal_index import get_signal_index as filed_get_signal_index
 from hyperion.tools.plan_remediation import plan_remediation as filed_plan_remediation
-from hyperion.tools.scan_code import _get_patterns
 from hyperion.tools.scan_code import scan_code as filed_scan_code
 from tests.test_hyperion_retrofit_s0 import (
     BASELINE_A_COMBINED,
@@ -60,11 +59,11 @@ from tests.test_hyperion_retrofit_s2 import _recall  # accessor recall (producti
 scan_mod = sys.modules["hyperion.tools.scan_code"]
 _SRC = Path(scan_mod.__file__).resolve().parents[2]  # .../src
 
-# The recognition-side symbols deleted this story. The scan detector island
-# (_get_patterns/_SCAN_PATTERNS + _HARDCODED_SECRETS/_INSECURE_IMPORTS_*/
-# _INSECURE_CRYPTO/_WEB_SECURITY) and the agent-threat detector (_AGENT_THREATS/
-# _AGENT_SIGNAL_KEYWORDS/_has_agent_signals) are NOT here -- the enrichment ruling
-# keeps them as the permanent sole detector.
+# The recognition-side symbols deleted at S6, plus the scan-detector islands deleted
+# at R4 (council 49fd71da): scan_code now reads its detectors from the DB
+# (get_code_detectors / get_agent_code_detectors), so _get_patterns and the six island
+# lists are gone. The agent-signal GATE (_AGENT_SIGNAL_KEYWORDS / _has_agent_signals)
+# is control logic, not a detector, and STAYS in scan_code -- so it is NOT listed here.
 _DELETED_RECOGNITION_SYMBOLS = (
     "match_structural_signals",
     "_DECISION_RULES",
@@ -74,6 +73,14 @@ _DELETED_RECOGNITION_SYMBOLS = (
     "_GENERIC_REMEDIATION",
     "_RISK_LEVELS",
     "_rule_signal_index",
+    # R4: the deleted scan-detector islands + their per-language builder.
+    "_get_patterns",
+    "_HARDCODED_SECRETS",
+    "_INSECURE_IMPORTS_PYTHON",
+    "_INSECURE_IMPORTS_JS",
+    "_INSECURE_CRYPTO",
+    "_WEB_SECURITY",
+    "_AGENT_THREATS",
 )
 
 
@@ -166,23 +173,31 @@ def test_no_shim_or_alias_reintroduced():
 
 
 # ===========================================================================
-# The scan detector island STAYS -- the permanent sole detector (enrichment ruling).
+# The scan detector islands are DELETED (R4) -- scan_code reads the DB. The agent
+# signal gate stays (control logic, not a detector); a known vuln still fires.
 # ===========================================================================
 
-def test_scan_detector_island_preserved():
+def test_scan_detector_island_deleted(kb):
+    """R4 (council 49fd71da): _get_patterns and the six island lists are gone from
+    scan_code -- the detectors now come from the DB (get_code_detectors). The
+    agent-signal GATE stays (control logic, not a detector), the per-language counts
+    are the frozen 29 / 25, and a known vulnerability still fires."""
     for sym in (
         "_get_patterns", "_HARDCODED_SECRETS", "_INSECURE_IMPORTS_PYTHON",
         "_INSECURE_IMPORTS_JS", "_INSECURE_CRYPTO", "_WEB_SECURITY",
-        "_AGENT_THREATS", "_AGENT_SIGNAL_KEYWORDS", "_has_agent_signals",
+        "_AGENT_THREATS",
     ):
-        assert hasattr(scan_mod, sym), sym
-
-
-def test_scan_detector_pattern_counts_unchanged():
-    """The kept island's pattern counts equal the S0-frozen island counts -- the
-    detector is byte-stable, not silently altered by the deletions."""
-    assert len(_get_patterns("python")) == BASELINE_C_PATTERNS_CHECKED["python"]
-    assert len(_get_patterns("javascript")) == BASELINE_C_PATTERNS_CHECKED["javascript"]
+        assert not hasattr(scan_mod, sym), sym
+    # The agent-signal gate is control logic, not a detector -- it STAYS.
+    assert hasattr(scan_mod, "_AGENT_SIGNAL_KEYWORDS")
+    assert hasattr(scan_mod, "_has_agent_signals")
+    # The DB is now the sole detector source, at the frozen per-language counts.
+    assert len(kb.get_code_detectors("python")) == BASELINE_C_PATTERNS_CHECKED["python"]
+    assert len(kb.get_code_detectors("javascript")) == (
+        BASELINE_C_PATTERNS_CHECKED["javascript"]
+    )
+    # A known vulnerability still fires through the DB detector set.
+    assert filed_scan_code("eval(user_input)", "python")["findings"]
 
 
 # ===========================================================================

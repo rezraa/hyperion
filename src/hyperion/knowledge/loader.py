@@ -13,8 +13,23 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The stdlib regex parser (dep-free) exposes the SAME AST re.compile itself builds.
+# It moved from ``sre_parse``/``sre_constants`` to ``re._parser``/``re._constants``
+# in 3.11; both are stdlib, so the load-time ReDoS quarantine below reuses the one
+# real parser (no bespoke regex lexer) and adds NO dependency.
+try:  # Python 3.11+
+    from re import _constants as _re_constants
+    from re import _parser as _re_parser
+except ImportError:  # pragma: no cover - Python <= 3.10
+    import sre_constants as _re_constants  # type: ignore[no-redef]
+    import sre_parse as _re_parser  # type: ignore[no-redef]
+
+_log = logging.getLogger(__name__)
 
 _KNOWLEDGE_DIR = Path(__file__).parent
 
@@ -91,6 +106,289 @@ def _signal_id(text: str) -> str:
     refer to a signal by a short id.
     """
     return "sig-" + hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:12]
+
+
+# ==========================================================================
+# Load-time static ReDoS quarantine (CWE-1333) — council 1fee93f2 / story R3.
+#
+# A dep-free static guard so an authored/edited ``code_detectors.json`` regex that
+# can catastrophically backtrack never enters the active detector set ``scan_code``
+# runs on untrusted code (R4 makes ``scan_code`` read detectors from the DB). The
+# check is PRECISE: a SINGLE unbounded quantifier (``.*`` / ``.+`` / ``.*?`` /
+# ``[^x]+``) is only POLYNOMIAL and is ceiling-bounded by ``scan_code``'s
+# ``_MAX_LINE_LENGTH`` (4000), so it is NOT quarantined. Only the two EXPONENTIAL
+# shapes are (Hyperion, assess_threat ``input_regex_dos``: "avoid nested
+# quantifiers", "alternation with overlapping patterns"):
+#   1. a backtracking quantifier over a body holding an AMBIGUOUS inner repeat.
+#      The danger is the INNER repeat's AMBIGUITY — min != max, so a single run of
+#      input can be split more than one way — NOT its magnitude. ``(a+)+`` and the
+#      easily-accidental small-bounded ``(a{1,2})+`` are BOTH exponential; a FIXED
+#      inner ``(a{3})+`` (min==max) is deterministic and safe (H3). When the OUTER
+#      quantifier is unbounded (or bounded so large it is unbounded-equivalent,
+#      ``(a{1,1000}){1,1000}`` — H2) an ambiguous inner is exponential outright;
+#      when BOTH are bounded the search space is inner_max ** outer_max, caught only
+#      once it exceeds ``_NESTED_SEARCH_CEILING`` so ``(a{1,9}){1,9}`` (387M) is
+#      quarantined but ``(a{1,5}){1,5}`` (3125) survives.
+#   2. overlapping alternation under a quantifier — ``(a|a)*`` ``(a|ab)+``
+# Either shape hidden inside a LOOKAROUND body (``(?=(a+)+$)``, ``(?!(a|a)+z)``) is
+# caught too: every walker recurses ASSERT/ASSERT_NOT subpatterns, not only groups
+# (H1). The engine reuses the stdlib parser ``re.compile`` itself uses (one source of
+# truth, no bespoke lexer) and DFS-walks the AST (Mnemos: DFS preorder, O(n) over
+# the pattern length). It FAILS CLOSED: an uncompilable/unparseable regex — or any
+# error analysing the untrusted pattern — quarantines. Over-approximation errs the
+# same way (a first-char clash under a quantifier quarantines even if the branches
+# later diverge), because for a security guard over-quarantine is the safe
+# direction. In-memory ONLY: the byte-frozen S0 ``code_detectors.json`` is never
+# written.
+# ==========================================================================
+
+_MAXREPEAT = _re_constants.MAXREPEAT
+_OP_MAX_REPEAT = _re_constants.MAX_REPEAT
+_OP_MIN_REPEAT = _re_constants.MIN_REPEAT
+_OP_SUBPATTERN = _re_constants.SUBPATTERN
+_OP_BRANCH = _re_constants.BRANCH
+_OP_LITERAL = _re_constants.LITERAL
+_OP_IN = _re_constants.IN
+# Lookaround ops: ``(?=...)`` / ``(?<=...)`` parse to ASSERT, ``(?!...)`` /
+# ``(?<!...)`` to ASSERT_NOT. Their arg is ``(direction, subpattern)`` — a
+# catastrophic quantifier can hide inside a lookaround body (``(?=(a+)+$)``), so
+# every walker MUST recurse that subpattern (``av[1]``) exactly as it does a group.
+_OP_ASSERT = _re_constants.ASSERT
+_OP_ASSERT_NOT = _re_constants.ASSERT_NOT
+_ASSERT_OPS = (_OP_ASSERT, _OP_ASSERT_NOT)
+# Possessive repeats (3.11+, ``a*+``) cannot backtrack, so a possessive OUTER
+# quantifier is never the catastrophic one; only greedy/lazy repeats backtrack.
+# Guarded getattr keeps the mirror importable on < 3.11.
+_OP_POSSESSIVE_REPEAT = getattr(_re_constants, "POSSESSIVE_REPEAT", None)
+_REPEAT_OPS = tuple(
+    op for op in (_OP_MAX_REPEAT, _OP_MIN_REPEAT, _OP_POSSESSIVE_REPEAT)
+    if op is not None
+)
+_BACKTRACKING_REPEAT_OPS = (_OP_MAX_REPEAT, _OP_MIN_REPEAT)
+
+# The OUTER-quantifier magnitude gate: a bounded max above this small ceiling makes
+# the outer quantifier unbounded-EQUIVALENT, because it can iterate enough times to
+# multiply an ambiguous inner into a DoS just as a ``+`` would (``(a{1,1000}){1,1000}``
+# backtracks like ``(a+)+`` — H2). It bounds the OUTER only; the INNER repeat's danger
+# is keyed on AMBIGUITY, not magnitude (:func:`_is_ambiguous`), so a small-bounded
+# ambiguous inner (``(a{1,2})+`` — H3) is not missed. Every real detector's outer
+# groups are un-quantified or ``?`` (max 1), far below this, so it never fires on one.
+_NESTED_REPEAT_CEILING: int = 10
+
+# The BOTH-BOUNDED search-space ceiling. When neither quantifier is unbounded-equiv
+# the nested pair's worst-case backtracking is a bounded constant, inner_max **
+# outer_max; below this ceiling it is trivially bounded (``(a{1,5}){1,5}`` = 3125,
+# Hyperion measured ~0s) and above it a DoS (``(a{1,9}){1,9}`` = 387,420,489, > 3s).
+# WHY this value: at ~10^5 partition attempts per anchored match position the bounded
+# blowup stops being trivial and becomes a real DoS multiplier; the named safe/bomb
+# controls sit 32x below and ~3900x above it, so both land firmly on the right side.
+_NESTED_SEARCH_CEILING: int = 100_000
+
+
+def _is_unbounded_equiv(maxrep: object) -> bool:
+    """True if an OUTER quantifier's max is unbounded, or so large it repeats as if.
+
+    ``maxrep`` is the parser's max-count field: the ``_MAXREPEAT`` sentinel for a
+    truly unbounded quantifier (``*`` ``+`` ``{n,}``), otherwise an int. A large
+    bounded max is unbounded-equivalent for the OUTER of a nested pair (H2), so a
+    ``(a{1,1000}){1,1000}`` bomb is caught the same as ``(a+)+``.
+    """
+    return maxrep is _MAXREPEAT or maxrep > _NESTED_REPEAT_CEILING
+
+
+def _is_ambiguous(minrep: object, maxrep: object) -> bool:
+    """True if a repeat is AMBIGUOUS: its min and max differ.
+
+    An ambiguous repeat lets a single run of input be consumed by more than one
+    iteration count, so an enclosing quantifier can split that run multiple ways —
+    the root of catastrophic backtracking (CWE-1333). Covers the unbounded
+    ``a+``/``a*``/``a{1,}`` (min != ``_MAXREPEAT``) AND bounded ranges
+    ``a{1,2}``/``a{0,n}``; a FIXED ``a{3}`` (min == max) is deterministic and safe.
+    """
+    return minrep != maxrep
+
+
+def _iter_inner_repeats(seq):
+    """Yield ``(min, max)`` for every BACKTRACKING repeat nested anywhere in *seq*.
+
+    The rule-1 helper: it surfaces the inner repeats an enclosing quantifier could
+    multiply. Recurses group, branch, repeat AND lookaround (ASSERT/ASSERT_NOT)
+    bodies, so an inner repeat buried in a nested group or a lookahead is found. A
+    POSSESSIVE inner (``a*+``) cannot backtrack and so introduces no ambiguity — its
+    bounds are not yielded, though its body is still walked for a backtracking repeat
+    nested below it.
+    """
+    for op, av in seq:
+        if op in _REPEAT_OPS:
+            if op in _BACKTRACKING_REPEAT_OPS:
+                yield (av[0], av[1])
+            yield from _iter_inner_repeats(av[2])
+        elif op is _OP_SUBPATTERN:
+            yield from _iter_inner_repeats(av[-1])
+        elif op is _OP_BRANCH:
+            for sub in av[1]:
+                yield from _iter_inner_repeats(sub)
+        elif op in _ASSERT_OPS:
+            yield from _iter_inner_repeats(av[1])
+
+
+def _nested_repeat_reason(outer_max: object, body) -> str | None:
+    """Why a backtracking outer quantifier over *body* is a nested-repeat bomb.
+
+    Rule 1, keyed on the INNER repeat's ambiguity (:func:`_is_ambiguous`), not its
+    magnitude. For each ambiguous inner repeat the outer would multiply:
+
+    * OUTER unbounded-equivalent (:func:`_is_unbounded_equiv`) -> exponential, the
+      classic ``(a+)+`` / small-bounded ``(a{1,2})+`` / large-bounded
+      ``(a{1,1000}){1,1000}`` (H2) bomb;
+    * BOTH bounded -> a constant search space ``inner_max ** outer_max``; a DoS only
+      once it exceeds ``_NESTED_SEARCH_CEILING`` (``(a{1,9}){1,9}`` yes,
+      ``(a{1,5}){1,5}`` no — H3). A bounded outer over an UNBOUNDED inner
+      (``(a+){1,3}``) is polynomial and ceiling-bounded, so it is not flagged here.
+
+    Returns the quarantine reason, or ``None`` when no inner repeat is dangerous.
+    """
+    outer_unbounded = _is_unbounded_equiv(outer_max)
+    for inner_min, inner_max in _iter_inner_repeats(body):
+        if not _is_ambiguous(inner_min, inner_max):
+            continue
+        if outer_unbounded:
+            return "nested unbounded quantifier"
+        if inner_max is not _MAXREPEAT and inner_max ** outer_max > _NESTED_SEARCH_CEILING:
+            return "nested bounded ambiguous quantifier"
+    return None
+
+
+def _first_chars(seq) -> frozenset[int] | None:
+    """Code points an alternation branch can START with, or ``None`` = wide.
+
+    ``None`` (an empty/zero-width, wildcard ``.``, negated, ranged, or category
+    leading atom) is treated as overlapping every other branch — a branch that
+    cannot be PROVEN to start disjointly is assumed to overlap (fail closed).
+    """
+    if not len(seq):
+        return None  # empty branch matches zero-width -> overlaps everything
+    op, av = seq[0]
+    if op is _OP_LITERAL:
+        return frozenset({av})
+    if op is _OP_IN:
+        chars: set[int] = set()
+        for iop, iav in av:
+            if iop is _OP_LITERAL:
+                chars.add(iav)
+            else:  # RANGE / NEGATE / CATEGORY -> not a finite, provable set
+                return None
+        return frozenset(chars)
+    if op is _OP_SUBPATTERN:
+        return _first_chars(av[-1])
+    if op is _OP_BRANCH:
+        acc: set[int] = set()
+        for sub in av[1]:
+            fc = _first_chars(sub)
+            if fc is None:
+                return None
+            acc |= fc
+        return frozenset(acc)
+    return None  # ANY / NOT_LITERAL / anchors / groupref / ... -> wide
+
+
+def _branches_overlap(branches) -> bool:
+    """True if any two alternation branches can match a common first character.
+
+    Prefix and equal overlaps surface here too: the parser factors a shared prefix
+    out of the branches and leaves an empty (``None`` -> wide) residual branch,
+    which overlaps every sibling — so ``(a|a)`` and ``(a|ab)`` are both caught.
+    """
+    firsts = [_first_chars(b) for b in branches]
+    for i in range(len(firsts)):
+        for j in range(i + 1, len(firsts)):
+            fi, fj = firsts[i], firsts[j]
+            if fi is None or fj is None or (fi & fj):
+                return True
+    return False
+
+
+def _overlapping_alternation(seq) -> bool:
+    """True if a parsed subpattern holds an overlapping alternation (rule-2 helper).
+
+    Scans the WHOLE quantified body: the parser factors common prefixes, so an
+    overlapping alternation can sit at any depth — inside a group, a lookaround, or
+    inside a bounded repeat that the outer unbounded quantifier still multiplies.
+    """
+    for op, av in seq:
+        if op is _OP_BRANCH:
+            if _branches_overlap(av[1]):
+                return True
+        elif op is _OP_SUBPATTERN:
+            if _overlapping_alternation(av[-1]):
+                return True
+        elif op in _REPEAT_OPS:
+            if _overlapping_alternation(av[2]):
+                return True
+        elif op in _ASSERT_OPS:
+            if _overlapping_alternation(av[1]):
+                return True
+    return False
+
+
+def _scan_redos(seq) -> str | None:
+    """DFS a parsed regex for a catastrophic-backtracking shape; ``None`` if safe.
+
+    At each backtracking quantifier, test its body for a nested ambiguous repeat
+    (rule 1, :func:`_nested_repeat_reason` — evaluated for a bounded outer too, so
+    the both-bounded ``(a{1,9}){1,9}`` blowup is caught) then, only under an
+    unbounded-equivalent outer, for an overlapping alternation (rule 2); recurse
+    through groups, branches, repeat AND lookaround (ASSERT/ASSERT_NOT) bodies
+    otherwise. A lone unbounded quantifier over a single atom (``.*``) reaches
+    neither rule — polynomial, kept.
+    """
+    for op, av in seq:
+        if op in _REPEAT_OPS:
+            body = av[2]
+            if op in _BACKTRACKING_REPEAT_OPS:
+                reason = _nested_repeat_reason(av[1], body)
+                if reason:
+                    return reason
+                if _is_unbounded_equiv(av[1]) and _overlapping_alternation(body):
+                    return "overlapping alternation under quantifier"
+            reason = _scan_redos(body)
+            if reason:
+                return reason
+        elif op is _OP_SUBPATTERN:
+            reason = _scan_redos(av[-1])
+            if reason:
+                return reason
+        elif op is _OP_BRANCH:
+            for sub in av[1]:
+                reason = _scan_redos(sub)
+                if reason:
+                    return reason
+        elif op in _ASSERT_OPS:
+            reason = _scan_redos(av[1])
+            if reason:
+                return reason
+    return None
+
+
+def static_redos_reason(regex: object) -> str | None:
+    """Return WHY *regex* must be quarantined, or ``None`` if it is ReDoS-safe.
+
+    The single source of truth for the load-time quarantine (one pure leaf):
+    compile-or-quarantine first (a bomb that will not even compile fails closed),
+    then a static AST walk for the exponential shapes. A single unbounded
+    quantifier is polynomial and ceiling-bounded, so it is NOT flagged. Any error
+    analysing the untrusted pattern fails closed (quarantine).
+    """
+    if not isinstance(regex, str):
+        return "detector has no string regex"
+    try:
+        re.compile(regex)
+    except re.error as exc:
+        return f"uncompilable regex: {exc}"
+    try:
+        return _scan_redos(_re_parser.parse(regex))
+    except Exception as exc:  # noqa: BLE001 - untrusted pattern: fail closed on any error
+        return f"unparseable regex: {exc}"
 
 
 @dataclass(frozen=True)
@@ -550,11 +848,15 @@ class KnowledgeLoader(_SignalEngine):
         with open(self._dir / "security_tools.json", encoding="utf-8") as f:
             self._security_tools_data = json.load(f)
 
+        with open(self._dir / "code_detectors.json", encoding="utf-8") as f:
+            self._code_detectors_data = json.load(f)
+
         # Build convenience lists.
         self._vectors: list[dict] = self._threat_vectors_data["vectors"]
         self._agent_threats: list[dict] = self._agent_threats_data["threats"]
         self._rules: list[dict] = self._decision_rules_data["rules"]
         self._tools: list[dict] = self._security_tools_data["tools"]
+        self._code_detectors: list[dict] = self._code_detectors_data["detectors"]
 
         # Index: vector_id -> vector_dict
         self._vector_index: dict[str, dict] = {
@@ -590,6 +892,67 @@ class KnowledgeLoader(_SignalEngine):
                 self._cwe_index.setdefault(c, []).append(v["id"])
         for c in self._cwe_index:
             self._cwe_index[c].sort()
+
+        # Load-time static ReDoS quarantine (story R3 / council 1fee93f2): scan
+        # EVERY code_detectors regex for a catastrophic-backtracking shape BEFORE it
+        # can enter the active detector set. A quarantined detector is EXCLUDED from
+        # ``_detectors_by_language`` (below) and surfaced in ``quarantined_detectors``
+        # (queryable) and LOGGED at load — never silently dropped. In-memory only:
+        # the byte-frozen ``code_detectors.json`` is untouched. Hyperion verified all
+        # 41 migrated regexes are ReDoS-safe, so a healthy load quarantines none.
+        self.quarantined_detectors: list[dict] = []
+        _quarantined_ids: set[str | None] = set()
+        for det in self._code_detectors:
+            reason = static_redos_reason(det.get("regex"))
+            if reason is not None:
+                _quarantined_ids.add(det.get("id"))
+                self.quarantined_detectors.append({
+                    "id": det.get("id"),
+                    "name": det.get("name"),
+                    "languages": list(det.get("languages", [])),
+                    "reason": reason,
+                })
+        if self.quarantined_detectors:
+            _log.warning(
+                "code_detectors ReDoS quarantine: %d detector(s) excluded from the "
+                "active scan set: %s",
+                len(self.quarantined_detectors),
+                ", ".join(
+                    f"{q['id']} ({q['reason']})" for q in self.quarantined_detectors
+                ),
+            )
+
+        # Build code-detector index: language -> code-shape detectors. The single
+        # source of truth for scan_code's per-language pattern set. Built ONCE here so
+        # get_code_detectors is an O(1) dict lookup for a canonical language, never an
+        # O(n) rescan per call. A ``["*"]`` universal detector folds into every named
+        # language's bucket, prepended in file order (universal-then-language) so the
+        # bucket mirrors the scanner's iteration order. The universal set and the
+        # per-language named sets are retained separately so get_code_detectors can
+        # compose the unknown-language fallback (universal + BOTH import sets) without
+        # a rescan. Agent-signal-gated detectors (``requires_agent_signals``) are NOT
+        # part of the language scan set — they run only when _has_agent_signals fires —
+        # so they are excluded here (and collected into ``_agent_code_detectors`` for
+        # the agent path) and the bucket count equals scan_code's ``patterns_checked``
+        # (python 29, javascript 25). A ReDoS-quarantined detector enters neither set.
+        self._detectors_by_language: dict[str, list[dict]] = {}
+        self._universal_code_detectors: list[dict] = []
+        self._named_code_detectors: dict[str, list[dict]] = {}
+        self._agent_code_detectors: list[dict] = []
+        for det in self._code_detectors:
+            if det.get("id") in _quarantined_ids:
+                continue  # ReDoS-quarantined: never enters any active detector set
+            if det.get("requires_agent_signals"):
+                self._agent_code_detectors.append(det)  # file order; the agent path
+                continue
+            langs = det.get("languages", [])
+            if "*" in langs:
+                self._universal_code_detectors.append(det)
+            else:
+                for lang in langs:
+                    self._named_code_detectors.setdefault(lang, []).append(det)
+        for lang, named in self._named_code_detectors.items():
+            self._detectors_by_language[lang] = self._universal_code_detectors + named
 
         # S2 dissolve (council b420a9f0-decision-1): fold the decision_rules'
         # structural_signals onto their recommended_threat vector's OWN ``signals``
@@ -853,18 +1216,66 @@ class KnowledgeLoader(_SignalEngine):
             return []
         return list(threat.get("detection_patterns", []))
 
-    def get_all_detection_patterns(self) -> dict[str, list[str]]:
-        """Get all detection patterns indexed by threat ID.
+    # Language aliases scan_code resolves to a canonical detector bucket — the single
+    # source of truth for the mapping the deleted in-code islands did by hand.
+    _LANGUAGE_ALIASES: dict[str, str] = {
+        "py": "python",
+        "js": "javascript",
+        "ts": "javascript",
+        "typescript": "javascript",
+    }
 
-        Returns {threat_id: [pattern, ...]} for every threat that has
-        detection patterns defined.
+    def get_code_detectors(self, language: str) -> list[dict]:
+        """Return the code-shape detectors that apply to *language*.
+
+        The single source of truth for scan_code's per-language pattern set, with the
+        alias + fallback resolution folded in (the resolution the deleted in-code
+        islands did by hand):
+
+        * ``language`` is lower-cased, then aliases resolve (py -> python;
+          js / ts / typescript -> javascript);
+        * a canonical language (python / javascript) is an O(1) lookup against the
+          ``_detectors_by_language`` index built once at load — the ``["*"]`` universal
+          detectors folded ahead of the language's own, in universal-then-language
+          order;
+        * an unknown language falls back to the universal detectors + BOTH the python
+          and javascript import sets, in universal-then-python-then-js order.
+
+        Agent-signal-gated detectors are excluded (they run only when
+        _has_agent_signals fires), so the count equals scan_code's ``patterns_checked``
+        — 29 for python, 25 for javascript, 34 for an unknown language. Returns a fresh
+        list so a caller cannot mutate the shared index.
         """
-        result: dict[str, list[str]] = {}
-        for v in self._vectors:
-            patterns = v.get("detection_patterns", [])
-            if patterns:
-                result[v["id"]] = list(patterns)
-        return result
+        lang = language.lower()
+        lang = self._LANGUAGE_ALIASES.get(lang, lang)
+        if lang in self._detectors_by_language:
+            return list(self._detectors_by_language[lang])
+        return list(
+            self._universal_code_detectors
+            + self._named_code_detectors.get("python", [])
+            + self._named_code_detectors.get("javascript", [])
+        )
+
+    def get_agent_code_detectors(self) -> list[dict]:
+        """Return the agent-signal-gated code detectors, in file order.
+
+        The single source of truth for scan_code's agent path: the
+        ``requires_agent_signals`` detectors from the FILTERED (non-quarantined) active
+        set, in the corpus file order. These run only when ``_has_agent_signals`` fires,
+        so they are held apart from the per-language scan set. Returns a fresh list so a
+        caller cannot mutate the shared index.
+        """
+        return list(self._agent_code_detectors)
+
+    def get_quarantined_detectors(self) -> list[dict]:
+        """Return the code detectors excluded by the load-time ReDoS quarantine.
+
+        Each entry is ``{id, name, languages, reason}``. Empty when every detector
+        is ReDoS-safe (the healthy state; all 41 migrated detectors pass). A
+        catastrophic-backtracking regex is surfaced here rather than silently
+        dropped. Returns a fresh list so a caller cannot mutate the loader's record.
+        """
+        return [dict(q) for q in self.quarantined_detectors]
 
     # ------------------------------------------------------------------
     # Remediation

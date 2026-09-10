@@ -7,415 +7,81 @@ Takes a code snippet and language, runs regex-based detection patterns
 against it, identifies hardcoded secrets, insecure imports, missing
 security headers, weak crypto, and agent-specific threats.  Returns
 findings with severity, CWE, line numbers, and remediation guidance.
+
+The detectors are the single source of truth in ``knowledge/code_detectors.json``,
+read through ``loader.get_code_detectors(language)`` (per-language scan set) and
+``loader.get_agent_code_detectors()`` (the agent-signal-gated set).
 """
 
 from __future__ import annotations
 
-import re
+import logging
 from typing import Any
 
+import regex
+
 from hyperion.tools._shared import coerce, emit_event, get_knowledge, normalize_kwargs
+
+_log = logging.getLogger(__name__)
 
 # Caller kwarg synonyms remapped to the canonical signature.
 _ALIASES = {"security_context": "context"}
 _IGNORED: set[str] = set()
 
-# ---------------------------------------------------------------------------
-# Detection patterns -- real regex-based security scanners
-# ---------------------------------------------------------------------------
-
-# Each pattern: (name, regex, severity, cwe, description, remediation)
-_HARDCODED_SECRETS: list[tuple[str, str, str, str, str, str]] = [
-    (
-        "hardcoded_api_key",
-        r"""(?i)(?:api[_-]?key|apikey)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]""",
-        "high",
-        "CWE-798",
-        "Hardcoded API key detected",
-        "Move API keys to environment variables or a secrets manager (e.g. AWS Secrets Manager, HashiCorp Vault).",
-    ),
-    (
-        "hardcoded_password",
-        r"""(?i)(?:password|passwd|pwd)\s*[:=]\s*['"][^'"]{4,}['"]""",
-        "critical",
-        "CWE-798",
-        "Hardcoded password detected",
-        "Never embed passwords in source code. Use environment variables or a secrets manager.",
-    ),
-    (
-        "hardcoded_token",
-        r"""(?i)(?:token|bearer|auth[_-]?token|access[_-]?token|secret[_-]?key)\s*[:=]\s*['"][A-Za-z0-9_\-/.]{16,}['"]""",
-        "high",
-        "CWE-798",
-        "Hardcoded authentication token detected",
-        "Store tokens in environment variables or a secrets manager. Rotate immediately if committed.",
-    ),
-    (
-        "aws_access_key",
-        r"""(?:^|['"\s])(?:AKIA[0-9A-Z]{16})(?:['"\s]|$)""",
-        "critical",
-        "CWE-798",
-        "AWS access key ID detected",
-        "Remove AWS credentials from source code. Use IAM roles, instance profiles, or AWS Secrets Manager.",
-    ),
-    (
-        "private_key_block",
-        r"""-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----""",
-        "critical",
-        "CWE-321",
-        "Private key embedded in source code",
-        "Never embed private keys in source. Store in a secrets manager or use a key management service.",
-    ),
-    (
-        "generic_secret",
-        r"""(?i)(?:secret|credential)\s*[:=]\s*['"][A-Za-z0-9_\-/.+]{8,}['"]""",
-        "high",
-        "CWE-798",
-        "Hardcoded secret/credential detected",
-        "Move secrets to environment variables or a dedicated secrets manager.",
-    ),
-    (
-        "connection_string_password",
-        r"""(?i)(?:mongodb|postgres|mysql|redis|amqp)(?:ql)?://[^:]+:[^@\s]+@""",
-        "critical",
-        "CWE-798",
-        "Database connection string with embedded credentials",
-        "Use environment variables for connection strings. Never embed credentials in URIs.",
-    ),
-]
-
-_INSECURE_IMPORTS_PYTHON: list[tuple[str, str, str, str, str, str]] = [
-    (
-        "eval_usage",
-        r"""\beval\s*\(""",
-        "critical",
-        "CWE-95",
-        "Use of eval() -- arbitrary code execution risk",
-        "Replace eval() with ast.literal_eval() for data parsing, or use a safe expression evaluator.",
-    ),
-    (
-        "exec_usage",
-        r"""\bexec\s*\(""",
-        "critical",
-        "CWE-95",
-        "Use of exec() -- arbitrary code execution risk",
-        "Avoid exec(). Use structured dispatch, importlib, or a sandbox if dynamic execution is required.",
-    ),
-    (
-        "subprocess_shell",
-        r"""subprocess\.(?:call|run|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True""",
-        "high",
-        "CWE-78",
-        "subprocess with shell=True -- command injection risk",
-        "Use shell=False (default) and pass arguments as a list. Sanitise all user input.",
-    ),
-    (
-        "pickle_loads",
-        r"""pickle\.(?:loads?|Unpickler)\s*\(""",
-        "high",
-        "CWE-502",
-        "pickle deserialization -- arbitrary code execution via crafted payloads",
-        "Use json, msgpack, or another safe serialization format. Never unpickle untrusted data.",
-    ),
-    (
-        "yaml_unsafe_load",
-        r"""yaml\.(?:load|unsafe_load)\s*\([^)]*(?:Loader\s*=\s*yaml\.(?:Loader|UnsafeLoader|FullLoader))?""",
-        "high",
-        "CWE-502",
-        "Unsafe YAML loading -- arbitrary code execution risk",
-        "Use yaml.safe_load() instead of yaml.load(). Never use yaml.UnsafeLoader.",
-    ),
-    (
-        "marshal_loads",
-        r"""marshal\.loads?\s*\(""",
-        "high",
-        "CWE-502",
-        "marshal deserialization -- code execution risk from untrusted data",
-        "Avoid deserializing untrusted data with marshal. Use JSON or another safe format.",
-    ),
-    (
-        "os_system",
-        r"""os\.system\s*\(""",
-        "high",
-        "CWE-78",
-        "os.system() -- command injection risk",
-        "Use subprocess.run() with shell=False and argument lists instead of os.system().",
-    ),
-    (
-        "tempfile_insecure",
-        r"""(?:tempfile\.)?mktemp\s*\(""",
-        "medium",
-        "CWE-377",
-        "Insecure temporary file creation -- race condition risk",
-        "Use tempfile.mkstemp() or tempfile.NamedTemporaryFile() for secure temp file creation.",
-    ),
-    (
-        "assert_security",
-        r"""assert\s+.*(?:auth|permission|role|admin|allowed|valid)""",
-        "medium",
-        "CWE-617",
-        "Security check using assert -- stripped in optimized mode (-O)",
-        "Replace assert with explicit if/raise for security-critical checks. Assert is for debugging only.",
-    ),
-]
-
-_INSECURE_IMPORTS_JS: list[tuple[str, str, str, str, str, str]] = [
-    (
-        "eval_usage",
-        r"""\beval\s*\(""",
-        "critical",
-        "CWE-95",
-        "Use of eval() -- arbitrary code execution risk",
-        "Use JSON.parse() for data, or a sandboxed evaluator. Never eval untrusted input.",
-    ),
-    (
-        "innerhtml_xss",
-        r"""\.innerHTML\s*=""",
-        "high",
-        "CWE-79",
-        "Direct innerHTML assignment -- cross-site scripting (XSS) risk",
-        "Use textContent for plain text, or sanitize with DOMPurify before setting innerHTML.",
-    ),
-    (
-        "document_write",
-        r"""document\.write\s*\(""",
-        "high",
-        "CWE-79",
-        "document.write() -- XSS risk and performance issues",
-        "Use DOM manipulation methods (createElement, appendChild) instead of document.write().",
-    ),
-    (
-        "child_process_exec",
-        r"""(?:child_process|exec|execSync|spawn)\s*\(""",
-        "high",
-        "CWE-78",
-        "Command execution -- injection risk if input is unsanitized",
-        "Use execFile() with argument arrays. Never interpolate user input into shell commands.",
-    ),
-    (
-        "new_function",
-        r"""new\s+Function\s*\(""",
-        "high",
-        "CWE-95",
-        "new Function() constructor -- equivalent to eval()",
-        "Avoid dynamic function creation. Use predefined functions or a safe dispatch pattern.",
-    ),
-]
-
-_INSECURE_CRYPTO: list[tuple[str, str, str, str, str, str]] = [
-    (
-        "md5_usage",
-        r"""(?i)(?:md5|MD5)\s*[.(]""",
-        "high",
-        "CWE-328",
-        "MD5 hash function -- cryptographically broken",
-        "Use SHA-256/SHA-3 for integrity checks, bcrypt/argon2 for passwords. MD5 is broken.",
-    ),
-    (
-        "sha1_password",
-        r"""(?i)(?:sha1|SHA1)\s*[.(]""",
-        "medium",
-        "CWE-328",
-        "SHA-1 hash function -- weak for security purposes",
-        "Use SHA-256/SHA-3 for integrity, bcrypt/argon2/scrypt for passwords.",
-    ),
-    (
-        "des_usage",
-        r"""(?i)\b(?:DES|3DES|TripleDES)\b""",
-        "high",
-        "CWE-327",
-        "DES/3DES encryption -- deprecated and weak",
-        "Use AES-256-GCM or ChaCha20-Poly1305 for symmetric encryption.",
-    ),
-    (
-        "ecb_mode",
-        r"""(?i)(?:ECB|MODE_ECB|AES\.ECB)""",
-        "high",
-        "CWE-327",
-        "ECB block cipher mode -- leaks data patterns",
-        "Use GCM, CBC with HMAC, or CTR mode. Never use ECB for anything beyond single-block encryption.",
-    ),
-    (
-        "weak_rsa_key",
-        r"""(?:generate|rsa).*?(?:1024|512)\b""",
-        "high",
-        "CWE-326",
-        "Weak RSA key size (512/1024 bits)",
-        "Use RSA-2048 minimum, RSA-4096 recommended. Consider switching to Ed25519.",
-    ),
-    (
-        "random_not_secure",
-        r"""(?:Math\.random|random\.random|random\.randint)\s*\(""",
-        "medium",
-        "CWE-338",
-        "Non-cryptographic random number generator used",
-        "Use secrets module (Python) or crypto.getRandomValues() (JS) for security-sensitive randomness.",
-    ),
-]
-
-_WEB_SECURITY: list[tuple[str, str, str, str, str, str]] = [
-    (
-        "debug_mode",
-        r"""(?i)(?:DEBUG|debug)\s*[:=]\s*(?:True|true|1|'true'|"true")""",
-        "high",
-        "CWE-489",
-        "Debug mode enabled -- exposes internals in production",
-        "Set DEBUG=False in production. Use environment variables to control debug state.",
-    ),
-    (
-        "cors_wildcard",
-        r"""(?i)(?:Access-Control-Allow-Origin|cors.*origin)\s*[:=]\s*['"]\*['"]""",
-        "high",
-        "CWE-942",
-        "CORS wildcard origin -- allows any domain to make requests",
-        "Restrict CORS origins to specific trusted domains. Never use '*' in production.",
-    ),
-    (
-        "sql_format_string",
-        r"""(?:execute|cursor\.execute|query)\s*\(\s*(?:f['"]|['"].*%|['"].*\.format)""",
-        "critical",
-        "CWE-89",
-        "SQL query built with string formatting -- SQL injection risk",
-        "Use parameterized queries (placeholders). Never interpolate user input into SQL strings.",
-    ),
-    (
-        "disable_ssl_verify",
-        r"""(?i)verify\s*=\s*False|SSL_VERIFY\s*[:=]\s*(?:False|false|0)|CERT_NONE|check_hostname\s*=\s*False""",
-        "high",
-        "CWE-295",
-        "SSL/TLS certificate verification disabled -- MITM attack risk",
-        "Always verify SSL certificates. Fix the root cause (expired cert, wrong CA) instead of disabling verification.",
-    ),
-    (
-        "hardcoded_ip",
-        r"""\b(?:0\.0\.0\.0|127\.0\.0\.1)\s*[,:]""",
-        "low",
-        "CWE-200",
-        "Hardcoded IP address -- may expose services unintentionally",
-        "Use configuration files or environment variables for host bindings. Bind to 127.0.0.1 not 0.0.0.0 in dev.",
-    ),
-    (
-        "verbose_errors",
-        r"""(?i)(?:traceback|stack_trace|print_exc|stacktrace)\s*[=(]""",
-        "medium",
-        "CWE-209",
-        "Verbose error output -- may leak internal details to attackers",
-        "Log full tracebacks server-side. Return generic error messages to clients.",
-    ),
-    (
-        "no_csrf",
-        r"""(?i)(?:csrf_exempt|disable_csrf|WTF_CSRF_ENABLED\s*=\s*False)""",
-        "high",
-        "CWE-352",
-        "CSRF protection disabled",
-        "Enable CSRF protection. Use framework-provided CSRF tokens for all state-changing requests.",
-    ),
-]
-
-# ---------------------------------------------------------------------------
-# Agent / LLM specific threats
-# ---------------------------------------------------------------------------
-
-_AGENT_THREATS: list[tuple[str, str, str, str, str, str]] = [
-    (
-        "prompt_injection_risk",
-        r"""(?i)(?:system_prompt|system_message|instructions)\s*[:=]\s*.*(?:user|input|request)""",
-        "critical",
-        "CWE-74",
-        "Potential prompt injection -- user input mixed into system prompt",
-        "Sanitize and validate all user input before including in prompts. Use structured prompt templates with clear boundaries.",
-    ),
-    (
-        "unrestricted_tool_access",
-        r"""(?i)(?:tools?\s*[:=]\s*\[.*(?:all|any|\*))""",
-        "high",
-        "CWE-269",
-        "Unrestricted tool access for agent -- excessive privilege",
-        "Apply least-privilege: only expose the specific tools the agent needs. Use allowlists, not denylists.",
-    ),
-    (
-        "unvalidated_tool_output",
-        r"""(?i)(?:tool_result|function_result|tool_output)\s*.*(?:exec|eval|execute|run)""",
-        "high",
-        "CWE-20",
-        "Tool output used without validation -- injection via tool results",
-        "Validate and sanitize all tool outputs before using them in prompts or executing them.",
-    ),
-    (
-        "context_overflow",
-        r"""(?i)(?:max_tokens|context_length|token_limit)\s*[:=]\s*(?:\d{6,}|None|null|float)""",
-        "medium",
-        "CWE-400",
-        "Unbounded or excessively large context window -- resource exhaustion risk",
-        "Set reasonable token limits. Implement input truncation and summarization for long contexts.",
-    ),
-    (
-        "no_output_filter",
-        r"""(?i)(?:guardrails?\s*[:=]\s*(?:None|null|False|false|\[\]|{}))""",
-        "high",
-        "CWE-20",
-        "No output guardrails configured -- unfiltered agent output",
-        "Implement output validation, content filtering, and safety guardrails for all agent responses.",
-    ),
-    (
-        "raw_llm_to_system",
-        r"""(?i)(?:os\.system|subprocess|exec|eval)\s*\(\s*(?:response|output|result|completion|message)""",
-        "critical",
-        "CWE-78",
-        "LLM output passed directly to system command execution",
-        "Never execute LLM output as code or system commands. Use structured actions with validated parameters.",
-    ),
-    (
-        "memory_poisoning_risk",
-        r"""(?i)(?:memory|context|history)\.(?:add|append|insert|update)\s*\(\s*(?:user|input|message)""",
-        "medium",
-        "CWE-20",
-        "User input stored directly in agent memory -- memory poisoning risk",
-        "Validate and sanitize user input before storing in agent memory. Implement memory integrity checks.",
-    ),
-]
-
-
-# ---------------------------------------------------------------------------
-# Pattern registry by language
-# ---------------------------------------------------------------------------
-
-def _get_patterns(language: str) -> list[tuple[str, str, str, str, str, str]]:
-    """Return all applicable detection patterns for the given language."""
-    patterns: list[tuple[str, str, str, str, str, str]] = []
-
-    # Universal patterns
-    patterns.extend(_HARDCODED_SECRETS)
-    patterns.extend(_INSECURE_CRYPTO)
-    patterns.extend(_WEB_SECURITY)
-
-    lang = language.lower()
-
-    if lang in ("python", "py"):
-        patterns.extend(_INSECURE_IMPORTS_PYTHON)
-    elif lang in ("javascript", "js", "typescript", "ts"):
-        patterns.extend(_INSECURE_IMPORTS_JS)
-    else:
-        # Include both for unknown languages
-        patterns.extend(_INSECURE_IMPORTS_PYTHON)
-        patterns.extend(_INSECURE_IMPORTS_JS)
-
-    return patterns
-
 
 # ---------------------------------------------------------------------------
 # Scan ceiling -- bounded brute-force over UNTRUSTED code (CWE-400 bulkhead)
 # ---------------------------------------------------------------------------
-# scan_code runs one re.search per (pattern, line) over attacker-controlled ``code``;
-# total work is patterns x lines x line-length. Both the line count and the per-line
+# scan_code runs one regex search per (detector, line) over attacker-controlled ``code``;
+# total work is detectors x lines x line-length. Both the line count and the per-line
 # length come from untrusted input, so the product is unbounded without a named
-# ceiling. These bound each untrusted factor where the per-(pattern x line) cost is
+# ceiling. These bound each untrusted factor where the per-(detector x line) cost is
 # incurred -- applied INSIDE scan_code as the untrusted ``code`` is read, before the
 # scan loop. A code SCANNER is meant for snippets, not whole repositories: beyond
-# these bounds the scan is truncated (``lines_scanned`` reports the real scanned
-# count) so the work can never grow with hostile input.
+# these bounds the scan is truncated -- reported LOUDLY (``incomplete`` plus the
+# ``truncated`` resume point below, not only ``lines_scanned``) so a caller can fetch
+# the next batch, and the work can never grow with hostile input.
 _MAX_SCAN_LINES = 20_000       # max lines scanned from untrusted ``code``
-_MAX_LINE_LENGTH = 4_000       # max chars per line fed to re.search
+_MAX_LINE_LENGTH = 4_000       # max chars per line fed to the match engine
+
+
+# ---------------------------------------------------------------------------
+# Char-truncation resume overlap -- CWE-400 resume CORRECTNESS (not a new ceiling)
+# ---------------------------------------------------------------------------
+# A per-line match can STRADDLE the _MAX_LINE_LENGTH cut: its start sits in batch 1
+# (chars ``[0:_MAX_LINE_LENGTH]``) but a required suffix -- a closing quote, a ``$``
+# anchor -- sits past the cut, so batch 1 never fires it. A caller that resumes a
+# truncated long line at the BARE ``char_offset`` (== _MAX_LINE_LENGTH) also misses it,
+# because the match's start is BEFORE that offset. So the ``truncated`` descriptor
+# publishes this overlap and the RESUME CONTRACT is: re-scan a truncated long line from
+# ``char_offset - resume_overlap``, never bare ``char_offset``. Sized ABOVE the longest
+# secret/token match a detector realistically produces on ONE line (long JWTs / base64
+# keys run a few hundred chars) and FAR below _MAX_LINE_LENGTH, so the resumed batch
+# still advances past the cut. RESIDUAL (stated honestly): a single match whose pre-cut
+# visible prefix EXCEEDS this overlap without yet firing is pathological on real source
+# and belongs to the deferred global total-scan-budget story, not this per-line resume.
+# A line-COUNT resume needs NO overlap -- matching is per line, so no match straddles a
+# line boundary; resume from ``last_line + 1`` with zero overlap.
+_RESUME_OVERLAP = 512          # chars to re-scan BEFORE char_offset on a long-line resume
+
+
+# ---------------------------------------------------------------------------
+# Per-match ReDoS deadline -- runtime backstop for CWE-1333 (cross-platform)
+# ---------------------------------------------------------------------------
+# The load-time static quarantine (loader.static_redos_reason) removes the KNOWN
+# catastrophic shapes before a detector enters the active set, but static analysis is
+# an over-approximation of a finite modelled shape set -- it cannot prove the absence
+# of every catastrophic backtracker. This is the runtime belt to that suspenders: NO
+# single match may hang scan_code, even on a pattern the static walker did not model.
+# Enforced by the ``regex`` module's ``timeout=`` -- a real mid-match deadline checked
+# inside the C match loop, so it interrupts an in-flight backtracking match IDENTICALLY
+# on macOS and Windows. It is a wall-clock check, NOT an OS interrupt timer -- an OS
+# timer is POSIX-only and cannot interrupt a stuck match anyway. The budget sits ~2000x
+# above the
+# slowest legitimate match over a _MAX_LINE_LENGTH line (measured ~0.5ms), so a real
+# detector never trips it; a catastrophic backtracker is cut here and surfaced LOUDLY
+# in ``timed_out`` (fail-open on the match, fail-loud on the report).
+_MATCH_TIMEOUT_SECONDS = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +103,76 @@ def _get_line_context(
             "is_match": i == line_idx,
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Detector sweep -- one source of truth for both the language and the agent paths
+# ---------------------------------------------------------------------------
+
+def _scan_detectors(
+    detectors: list[dict[str, Any]],
+    lines: list[str],
+    seen: set[str],
+    timed_out: list[dict[str, Any]],
+    dedup_prefix: str = "",
+    skipped: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Run each detector's regex against every line and return the findings.
+
+    Each finding is built from the detector's OWN fields: ``base_severity`` remaps to
+    the finding's ``severity`` and ``name`` to ``pattern``; ``regex`` / ``cwe`` /
+    ``description`` / ``remediation`` map straight through. Findings are de-duplicated
+    on ``(dedup_prefix, detector name, line)`` against the shared *seen* set, so the
+    language and agent sweeps never double-report the same detector on a line while
+    staying independent across the two paths.
+
+    Every match runs under the per-match ReDoS deadline (``_MATCH_TIMEOUT_SECONDS``):
+    a catastrophic backtracker is interrupted at the deadline (cross-platform, no
+    signal) instead of hanging. A timed-out ``(detector, line)`` is SKIPPED (fail-open
+    on the match) and appended to the shared *timed_out* accumulator (fail-loud on the
+    report), so the caller can never miss the gap.
+
+    A detector whose ``regex`` will not compile is SKIPPED the same honest way: it is
+    appended to the shared *skipped* accumulator (fail-open on the detector, fail-loud
+    on the report) so a partial scan can never look clean. This arm is UNREACHABLE
+    today -- the loader compiles and quarantines every detector before scan_code sees
+    it -- but it holds the honesty contract even if the load-time and scan-time engines
+    ever diverged.
+    """
+    out: list[dict[str, Any]] = []
+    if skipped is None:
+        skipped = []
+    for det in detectors:
+        try:
+            compiled = regex.compile(det["regex"])
+        except regex.error:
+            skipped.append({"detector": det["name"], "reason": "uncompilable"})
+            continue
+
+        for line_idx, line in enumerate(lines):
+            try:
+                match = compiled.search(line, timeout=_MATCH_TIMEOUT_SECONDS)
+            except TimeoutError:
+                timed_out.append({"detector": det["name"], "line": line_idx + 1})
+                continue
+            if not match:
+                continue
+            dedup_key = f"{dedup_prefix}{det['name']}:{line_idx}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            out.append({
+                "pattern": det["name"],
+                "severity": det["base_severity"],
+                "cwe": det["cwe"],
+                "description": det["description"],
+                "remediation": det["remediation"],
+                "line_number": line_idx + 1,
+                "matched_text": match.group(0),
+                "line_content": line.rstrip(),
+                "context_lines": _get_line_context(lines, line_idx),
+            })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -552,78 +288,59 @@ def scan_code(
     Returns:
         Dict with keys: findings (list), summary (severity counts),
         risk_score (0-10), agent_threats (list, if applicable),
-        lines_scanned, patterns_checked.
+        lines_scanned, patterns_checked, incomplete (bool), timed_out
+        (list of ``{detector, line}`` the per-match ReDoS deadline skipped) and
+        skipped (list of ``{detector, reason}`` a detector that would not compile);
+        plus, when the CWE-400 ceiling cut the input, truncated (the RESUME
+        POINT). ``truncated`` carries ``last_line`` (resume a line-count cut from
+        ``last_line + 1`` -- NO overlap, matching is per line) and, for a mid-line
+        cut, ``char_offset`` with ``resume_overlap`` and ``truncated_lines``:
+        re-scan a truncated long line from ``char_offset - resume_overlap`` (NOT
+        bare ``char_offset``, which would drop a match straddling the cut). When
+        ``incomplete`` is True the risk_score and summary are a LOWER BOUND --
+        unscanned code may hold more.
     """
     context = coerce(context, str)
 
-    patterns = _get_patterns(language)
-    # Bound the untrusted input where the patterns x lines cost is incurred (CWE-400):
+    kb = get_knowledge(conn)
+    detectors = kb.get_code_detectors(language)
+    # Bound the untrusted input where the detectors x lines cost is incurred (CWE-400):
     # cap the scanned line count and truncate each line before the scan loop below, so
-    # the product patterns x lines x chars can never grow with hostile ``code``.
-    lines = [ln[:_MAX_LINE_LENGTH] for ln in code.splitlines()[:_MAX_SCAN_LINES]]
+    # the product detectors x lines x chars can never grow with hostile ``code``. Every
+    # cut is reported LOUDLY below (the ``truncated`` descriptor) with a resume point, so
+    # a caller can fetch the next batch from exactly where the ceiling stopped -- never a
+    # silent drop.
+    raw_lines = code.splitlines()
+    scanned_raw = raw_lines[:_MAX_SCAN_LINES]
+    lines = [ln[:_MAX_LINE_LENGTH] for ln in scanned_raw]
+    # Which untrusted factor(s) the ceiling actually cut (the resume point, below):
+    line_count_truncated = len(raw_lines) > _MAX_SCAN_LINES
+    long_lines = [
+        i + 1 for i, ln in enumerate(scanned_raw) if len(ln) > _MAX_LINE_LENGTH
+    ]
 
     findings: list[dict[str, Any]] = []
-    seen: set[str] = set()  # deduplicate: (pattern_name, line_number)
+    seen: set[str] = set()  # deduplicate: (prefix, pattern_name, line_number)
+    # Partial-scan accumulators, shared across the language and agent sweeps so no gap
+    # is lost between them: ``timed_out`` holds each ``{detector, line}`` the per-match
+    # ReDoS deadline SKIPPED; ``skipped`` holds each ``{detector, reason}`` whose regex
+    # would not compile. Both are fail-open on the item, fail-loud on the report below.
+    timed_out: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
 
-    # Run every detection pattern against every line
-    for name, regex, severity, cwe, description, remediation in patterns:
-        try:
-            compiled = re.compile(regex)
-        except re.error:
-            continue
+    # Run every language detector against every line (the DB is the sole detector).
+    findings.extend(_scan_detectors(detectors, lines, seen, timed_out, skipped=skipped))
 
-        for line_idx, line in enumerate(lines):
-            match = compiled.search(line)
-            if match:
-                dedup_key = f"{name}:{line_idx}"
-                if dedup_key in seen:
-                    continue
-                seen.add(dedup_key)
-
-                finding: dict[str, Any] = {
-                    "pattern": name,
-                    "severity": severity,
-                    "cwe": cwe,
-                    "description": description,
-                    "remediation": remediation,
-                    "line_number": line_idx + 1,
-                    "matched_text": match.group(0),
-                    "line_content": line.rstrip(),
-                    "context_lines": _get_line_context(lines, line_idx),
-                }
-                findings.append(finding)
-
-    # Check for agent-specific threats
+    # Check for agent-specific threats. The agent-signal gate (_has_agent_signals /
+    # _AGENT_SIGNAL_KEYWORDS) is control logic, not a detector, so it stays here; the
+    # agent detectors themselves come from the DB.
     agent_threats: list[dict[str, Any]] = []
     if _has_agent_signals(code):
-        for name, regex, severity, cwe, description, remediation in _AGENT_THREATS:
-            try:
-                compiled = re.compile(regex)
-            except re.error:
-                continue
-
-            for line_idx, line in enumerate(lines):
-                match = compiled.search(line)
-                if match:
-                    dedup_key = f"agent:{name}:{line_idx}"
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
-
-                    threat: dict[str, Any] = {
-                        "pattern": name,
-                        "severity": severity,
-                        "cwe": cwe,
-                        "description": description,
-                        "remediation": remediation,
-                        "line_number": line_idx + 1,
-                        "matched_text": match.group(0),
-                        "line_content": line.rstrip(),
-                        "context_lines": _get_line_context(lines, line_idx),
-                    }
-                    agent_threats.append(threat)
-                    # Agent threats also go in the main findings
-                    findings.append(threat)
+        agent_threats = _scan_detectors(
+            kb.get_agent_code_detectors(), lines, seen, timed_out, "agent:", skipped=skipped,
+        )
+        # Agent threats also go in the main findings.
+        findings.extend(agent_threats)
 
     # Compute summary counts
     summary: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -635,30 +352,28 @@ def scan_code(
     risk_score = _compute_risk_score(findings)
 
     # Enrich each finding with its SOURCE vector(s) from the corpus (S5, mid-story
-    # council REVISE path (a)). The CURATED regex island above stays the SOLE
-    # detector — the finding SET is unchanged; each finding is only DECORATED with
-    # the corpus vector(s) its CWE maps to, so the corpus content (each vector's OWN
+    # council REVISE path (a)). The DB detector set read above stays the SOLE detector
+    # — the finding SET is unchanged; each finding is only DECORATED with the corpus
+    # vector(s) its CWE maps to, so the corpus content (each vector's OWN
     # name / severity / remediation) reaches the scanner's output. This REPLACES the
     # dead ``get_detection_patterns(LANGUAGE)`` bridge: the loader keys
     # detection_patterns on threat_id, so language lookups returned 0/316 reachable —
     # and materialising those 316 patterns AS detectors floods 60 corpus-authoring
     # false positives (secure examples 62/65 fire), so it is DEFERRED behind a
     # corpus-authoring prerequisite epic. No corpus regex is admitted as a detector,
-    # so ``patterns_checked`` stays the true island count and summary / risk_score
+    # so ``patterns_checked`` stays the true detector count and summary / risk_score
     # (computed above) are final.
     #
     # Bounded by the scan ceiling above: the fan-out per CWE is corpus-fixed (a small,
-    # constant set of vectors), and the loop is over the island's OWN findings, whose
-    # count is bounded by the _MAX_SCAN_LINES x patterns scan above -- so the enrichment
-    # reads no unbounded input. Best-effort: if the knowledge base is unavailable the
-    # findings stay undecorated (empty ``source_vectors``); the island detector ran.
-    kb = None
+    # constant set of vectors), and the loop is over the findings, whose count is
+    # bounded by the _MAX_SCAN_LINES x detectors scan above -- so the enrichment reads
+    # no unbounded input. Best-effort: if the CWE mapping is unavailable the findings
+    # stay undecorated (empty ``source_vectors``); the DB detectors still ran.
     cwe_map: dict[str, list[str]] = {}
     try:
-        kb = get_knowledge(conn)
         cwe_map = kb.cwe_to_threat_ids()
     except Exception:
-        kb, cwe_map = None, {}
+        cwe_map = {}
     for f in findings:
         f["source_vectors"] = _source_vectors(kb, cwe_map, f.get("cwe", ""))
 
@@ -666,13 +381,52 @@ def scan_code(
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings.sort(key=lambda f: (severity_order.get(f["severity"], 5), f["line_number"]))
 
+    # LOUD, RESUMABLE partial-scan reporting -- CWE-1333 (per-match timeout) and
+    # CWE-400 (input ceiling), plus an uncompilable detector (``skipped``). A scan is
+    # INCOMPLETE if any match timed out, any detector was skipped, OR the ceiling cut
+    # the input; when incomplete, ``risk_score`` / ``summary`` are a LOWER BOUND -- the
+    # unscanned code may hold more findings. ``truncated`` carries the RESUME POINT so a
+    # caller can fetch the next batch from exactly where the scan stopped:
+    #   * ``last_line`` is the last line scanned. On a line-count cut resume from
+    #     ``last_line + 1`` with NO overlap -- matching is per line, so no match
+    #     straddles a line boundary.
+    #   * ``char_offset`` / ``truncated_lines`` name the lines cut MID-LINE. Re-scan
+    #     each from ``char_offset - resume_overlap`` (NOT bare ``char_offset``): a match
+    #     can straddle the cut -- start before ``char_offset`` yet need a suffix past it
+    #     -- so a bare-offset resume would silently drop it. ``resume_overlap`` is the
+    #     re-entry guard published for exactly that hazard.
+    truncated: dict[str, Any] = {}
+    if line_count_truncated or long_lines:
+        truncated["last_line"] = len(lines)
+        truncated["line_count_truncated"] = line_count_truncated
+        truncated["total_lines"] = len(raw_lines)
+        truncated["max_scan_lines"] = _MAX_SCAN_LINES
+        if long_lines:
+            truncated["char_offset"] = _MAX_LINE_LENGTH
+            truncated["resume_overlap"] = _RESUME_OVERLAP
+            truncated["truncated_lines"] = long_lines
+
+    incomplete = bool(timed_out or skipped or truncated)
+
     result: dict[str, Any] = {
         "findings": findings,
         "summary": summary,
         "risk_score": risk_score,
         "lines_scanned": len(lines),
-        "patterns_checked": len(patterns),
+        "patterns_checked": len(detectors),
+        "incomplete": incomplete,
+        "timed_out": timed_out,
+        "skipped": skipped,
     }
+    if truncated:
+        result["truncated"] = truncated
+
+    if incomplete:
+        _log.warning(
+            "scan_code partial scan -- results are a LOWER BOUND: "
+            "%d match timeout(s), %d skipped detector(s), truncated=%s",
+            len(timed_out), len(skipped), truncated or None,
+        )
 
     if agent_threats:
         result["agent_threats"] = agent_threats
@@ -685,6 +439,10 @@ def scan_code(
         "risk_score": risk_score,
         "summary": summary,
         "agent_code_detected": bool(agent_threats),
+        "incomplete": incomplete,
+        "timed_out_count": len(timed_out),
+        "skipped_count": len(skipped),
+        "truncated": bool(truncated),
     })
 
     return result

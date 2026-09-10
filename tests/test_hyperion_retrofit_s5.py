@@ -48,9 +48,9 @@ from hyperion.knowledge.loader import KnowledgeLoader
 from hyperion.tools.scan_code import (
     _MAX_LINE_LENGTH,
     _MAX_SCAN_LINES,
-    _get_patterns,
     scan_code,
 )
+from tests._hyperion_island_snapshot import island_reference
 from tests.test_hyperion_retrofit_s0 import (
     BASELINE_C_PATTERNS_CHECKED,
     BASELINE_C_SECURE_FIRING,
@@ -166,17 +166,17 @@ def test_uncovered_cwe_has_empty_source_vectors(kb):
 # patterns_checked -- the TRUE island count, unchanged (no new detector regex).
 # ===========================================================================
 
-def test_patterns_checked_is_true_island_count():
-    """patterns_checked reports the island count (29 py / 25 js), unchanged -- no
+def test_patterns_checked_is_true_island_count(kb):
+    """patterns_checked reports the detector count (29 py / 25 js), unchanged -- no
     new detector regex is admitted (enrichment is not a detector)."""
     assert scan_code(_SQLI, "python")["patterns_checked"] == (
         BASELINE_C_PATTERNS_CHECKED["python"]
     )
-    assert len(_get_patterns("python")) == BASELINE_C_PATTERNS_CHECKED["python"]
+    assert len(kb.get_code_detectors("python")) == BASELINE_C_PATTERNS_CHECKED["python"]
     assert scan_code("var x = eval(y);", "javascript")["patterns_checked"] == (
         BASELINE_C_PATTERNS_CHECKED["javascript"]
     )
-    assert len(_get_patterns("javascript")) == (
+    assert len(kb.get_code_detectors("javascript")) == (
         BASELINE_C_PATTERNS_CHECKED["javascript"]
     )
 
@@ -219,7 +219,7 @@ def test_enrichment_adds_no_new_finding_entries(kb):
                 continue
             lines = code.splitlines()
             island_keys: set[tuple[str, int]] = set()
-            for name, regex, *_ in _get_patterns("python"):
+            for name, regex, *_ in island_reference("python"):
                 try:
                     rx = re.compile(regex)
                 except re.error:

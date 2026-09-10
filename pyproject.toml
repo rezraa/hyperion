@@ -15,6 +15,10 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
     "jinja2>=3.1.0",
+    # Runtime ReDoS backstop (CWE-1333): a re-superset engine whose ``timeout=`` is a
+    # real mid-match deadline, so scan_code can interrupt a catastrophic-backtracking
+    # match IDENTICALLY on macOS and Windows (a wall-clock check, not an OS timer).
+    "regex>=2024.0.0",
 ]
 
 [project.optional-dependencies]

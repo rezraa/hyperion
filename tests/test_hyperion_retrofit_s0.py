@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 
 from hyperion.knowledge.loader import _KNOWLEDGE_DIR, KnowledgeLoader
-from hyperion.tools.scan_code import _get_patterns, scan_code
+from hyperion.tools.scan_code import scan_code
 
 KNOWLEDGE_DIR = Path(_KNOWLEDGE_DIR)
 
@@ -279,6 +279,7 @@ def test_answer_key_location_independent(tmp_path):
     for name in (
         "threat_vectors.json", "agent_threats.json",
         "decision_rules.json", "security_tools.json",
+        "code_detectors.json",
     ):
         shutil.copy(KNOWLEDGE_DIR / name, dest / name)
     key = build_answer_key(dest)
@@ -333,9 +334,9 @@ def test_stratum_C_corpus_pattern_bridge_is_dead(kb, answer_key):
     assert reachable == BASELINE_C_CORPUS_PATTERNS_REACHABLE
 
 
-def test_stratum_C_patterns_checked_excludes_agent_island():
-    assert len(_get_patterns("python")) == BASELINE_C_PATTERNS_CHECKED["python"]
-    assert len(_get_patterns("javascript")) == (
+def test_stratum_C_patterns_checked_excludes_agent_island(kb):
+    assert len(kb.get_code_detectors("python")) == BASELINE_C_PATTERNS_CHECKED["python"]
+    assert len(kb.get_code_detectors("javascript")) == (
         BASELINE_C_PATTERNS_CHECKED["javascript"]
     )
 

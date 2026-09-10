@@ -1,0 +1,619 @@
+{
+  "detectors": [
+    {
+      "id": "cd-secret-hardcoded_api_key",
+      "detector_kind": "code_shape",
+      "name": "hardcoded_api_key",
+      "regex": "(?i)(?:api[_-]?key|apikey)\\s*[:=]\\s*['\"][A-Za-z0-9_\\-]{16,}['\"]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-798",
+      "description": "Hardcoded API key detected",
+      "remediation": "Move API keys to environment variables or a secrets manager (e.g. AWS Secrets Manager, HashiCorp Vault).",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-secret-hardcoded_password",
+      "detector_kind": "code_shape",
+      "name": "hardcoded_password",
+      "regex": "(?i)(?:password|passwd|pwd)\\s*[:=]\\s*['\"][^'\"]{4,}['\"]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-798",
+      "description": "Hardcoded password detected",
+      "remediation": "Never embed passwords in source code. Use environment variables or a secrets manager.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-secret-hardcoded_token",
+      "detector_kind": "code_shape",
+      "name": "hardcoded_token",
+      "regex": "(?i)(?:token|bearer|auth[_-]?token|access[_-]?token|secret[_-]?key)\\s*[:=]\\s*['\"][A-Za-z0-9_\\-/.]{16,}['\"]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-798",
+      "description": "Hardcoded authentication token detected",
+      "remediation": "Store tokens in environment variables or a secrets manager. Rotate immediately if committed.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-secret-aws_access_key",
+      "detector_kind": "code_shape",
+      "name": "aws_access_key",
+      "regex": "(?:^|['\"\\s])(?:AKIA[0-9A-Z]{16})(?:['\"\\s]|$)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-798",
+      "description": "AWS access key ID detected",
+      "remediation": "Remove AWS credentials from source code. Use IAM roles, instance profiles, or AWS Secrets Manager.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-secret-private_key_block",
+      "detector_kind": "code_shape",
+      "name": "private_key_block",
+      "regex": "-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-321",
+      "description": "Private key embedded in source code",
+      "remediation": "Never embed private keys in source. Store in a secrets manager or use a key management service.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-secret-generic_secret",
+      "detector_kind": "code_shape",
+      "name": "generic_secret",
+      "regex": "(?i)(?:secret|credential)\\s*[:=]\\s*['\"][A-Za-z0-9_\\-/.+]{8,}['\"]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-798",
+      "description": "Hardcoded secret/credential detected",
+      "remediation": "Move secrets to environment variables or a dedicated secrets manager.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-secret-connection_string_password",
+      "detector_kind": "code_shape",
+      "name": "connection_string_password",
+      "regex": "(?i)(?:mongodb|postgres|mysql|redis|amqp)(?:ql)?://[^:]+:[^@\\s]+@",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-798",
+      "description": "Database connection string with embedded credentials",
+      "remediation": "Use environment variables for connection strings. Never embed credentials in URIs.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-crypto-md5_usage",
+      "detector_kind": "code_shape",
+      "name": "md5_usage",
+      "regex": "(?i)(?:md5|MD5)\\s*[.(]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-328",
+      "description": "MD5 hash function -- cryptographically broken",
+      "remediation": "Use SHA-256/SHA-3 for integrity checks, bcrypt/argon2 for passwords. MD5 is broken.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-crypto-sha1_password",
+      "detector_kind": "code_shape",
+      "name": "sha1_password",
+      "regex": "(?i)(?:sha1|SHA1)\\s*[.(]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-328",
+      "description": "SHA-1 hash function -- weak for security purposes",
+      "remediation": "Use SHA-256/SHA-3 for integrity, bcrypt/argon2/scrypt for passwords.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-crypto-des_usage",
+      "detector_kind": "code_shape",
+      "name": "des_usage",
+      "regex": "(?i)\\b(?:DES|3DES|TripleDES)\\b",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-327",
+      "description": "DES/3DES encryption -- deprecated and weak",
+      "remediation": "Use AES-256-GCM or ChaCha20-Poly1305 for symmetric encryption.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-crypto-ecb_mode",
+      "detector_kind": "code_shape",
+      "name": "ecb_mode",
+      "regex": "(?i)(?:ECB|MODE_ECB|AES\\.ECB)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-327",
+      "description": "ECB block cipher mode -- leaks data patterns",
+      "remediation": "Use GCM, CBC with HMAC, or CTR mode. Never use ECB for anything beyond single-block encryption.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-crypto-weak_rsa_key",
+      "detector_kind": "code_shape",
+      "name": "weak_rsa_key",
+      "regex": "(?:generate|rsa).*?(?:1024|512)\\b",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-326",
+      "description": "Weak RSA key size (512/1024 bits)",
+      "remediation": "Use RSA-2048 minimum, RSA-4096 recommended. Consider switching to Ed25519.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-crypto-random_not_secure",
+      "detector_kind": "code_shape",
+      "name": "random_not_secure",
+      "regex": "(?:Math\\.random|random\\.random|random\\.randint)\\s*\\(",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-338",
+      "description": "Non-cryptographic random number generator used",
+      "remediation": "Use secrets module (Python) or crypto.getRandomValues() (JS) for security-sensitive randomness.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-web-debug_mode",
+      "detector_kind": "code_shape",
+      "name": "debug_mode",
+      "regex": "(?i)(?:DEBUG|debug)\\s*[:=]\\s*(?:True|true|1|'true'|\"true\")",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-489",
+      "description": "Debug mode enabled -- exposes internals in production",
+      "remediation": "Set DEBUG=False in production. Use environment variables to control debug state.",
+      "requires_agent_signals": false,
+      "category": "configuration"
+    },
+    {
+      "id": "cd-web-cors_wildcard",
+      "detector_kind": "code_shape",
+      "name": "cors_wildcard",
+      "regex": "(?i)(?:Access-Control-Allow-Origin|cors.*origin)\\s*[:=]\\s*['\"]\\*['\"]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-942",
+      "description": "CORS wildcard origin -- allows any domain to make requests",
+      "remediation": "Restrict CORS origins to specific trusted domains. Never use '*' in production.",
+      "requires_agent_signals": false,
+      "category": "authorization"
+    },
+    {
+      "id": "cd-web-sql_format_string",
+      "detector_kind": "code_shape",
+      "name": "sql_format_string",
+      "regex": "(?:execute|cursor\\.execute|query)\\s*\\(\\s*(?:f['\"]|['\"].*%|['\"].*\\.format)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-89",
+      "description": "SQL query built with string formatting -- SQL injection risk",
+      "remediation": "Use parameterized queries (placeholders). Never interpolate user input into SQL strings.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-web-disable_ssl_verify",
+      "detector_kind": "code_shape",
+      "name": "disable_ssl_verify",
+      "regex": "(?i)verify\\s*=\\s*False|SSL_VERIFY\\s*[:=]\\s*(?:False|false|0)|CERT_NONE|check_hostname\\s*=\\s*False",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-295",
+      "description": "SSL/TLS certificate verification disabled -- MITM attack risk",
+      "remediation": "Always verify SSL certificates. Fix the root cause (expired cert, wrong CA) instead of disabling verification.",
+      "requires_agent_signals": false,
+      "category": "cryptographic"
+    },
+    {
+      "id": "cd-web-hardcoded_ip",
+      "detector_kind": "code_shape",
+      "name": "hardcoded_ip",
+      "regex": "\\b(?:0\\.0\\.0\\.0|127\\.0\\.0\\.1)\\s*[,:]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "low",
+      "cwe": "CWE-200",
+      "description": "Hardcoded IP address -- may expose services unintentionally",
+      "remediation": "Use configuration files or environment variables for host bindings. Bind to 127.0.0.1 not 0.0.0.0 in dev.",
+      "requires_agent_signals": false,
+      "category": "data_exposure"
+    },
+    {
+      "id": "cd-web-verbose_errors",
+      "detector_kind": "code_shape",
+      "name": "verbose_errors",
+      "regex": "(?i)(?:traceback|stack_trace|print_exc|stacktrace)\\s*[=(]",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-209",
+      "description": "Verbose error output -- may leak internal details to attackers",
+      "remediation": "Log full tracebacks server-side. Return generic error messages to clients.",
+      "requires_agent_signals": false,
+      "category": "configuration"
+    },
+    {
+      "id": "cd-web-no_csrf",
+      "detector_kind": "code_shape",
+      "name": "no_csrf",
+      "regex": "(?i)(?:csrf_exempt|disable_csrf|WTF_CSRF_ENABLED\\s*=\\s*False)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-352",
+      "description": "CSRF protection disabled",
+      "remediation": "Enable CSRF protection. Use framework-provided CSRF tokens for all state-changing requests.",
+      "requires_agent_signals": false,
+      "category": "authorization"
+    },
+    {
+      "id": "cd-pyimport-eval_usage",
+      "detector_kind": "code_shape",
+      "name": "eval_usage",
+      "regex": "\\beval\\s*\\(",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-95",
+      "description": "Use of eval() -- arbitrary code execution risk",
+      "remediation": "Replace eval() with ast.literal_eval() for data parsing, or use a safe expression evaluator.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-pyimport-exec_usage",
+      "detector_kind": "code_shape",
+      "name": "exec_usage",
+      "regex": "\\bexec\\s*\\(",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-95",
+      "description": "Use of exec() -- arbitrary code execution risk",
+      "remediation": "Avoid exec(). Use structured dispatch, importlib, or a sandbox if dynamic execution is required.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-pyimport-subprocess_shell",
+      "detector_kind": "code_shape",
+      "name": "subprocess_shell",
+      "regex": "subprocess\\.(?:call|run|Popen|check_output|check_call)\\s*\\([^)]*shell\\s*=\\s*True",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-78",
+      "description": "subprocess with shell=True -- command injection risk",
+      "remediation": "Use shell=False (default) and pass arguments as a list. Sanitise all user input.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-pyimport-pickle_loads",
+      "detector_kind": "code_shape",
+      "name": "pickle_loads",
+      "regex": "pickle\\.(?:loads?|Unpickler)\\s*\\(",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-502",
+      "description": "pickle deserialization -- arbitrary code execution via crafted payloads",
+      "remediation": "Use json, msgpack, or another safe serialization format. Never unpickle untrusted data.",
+      "requires_agent_signals": false,
+      "category": "input_validation"
+    },
+    {
+      "id": "cd-pyimport-yaml_unsafe_load",
+      "detector_kind": "code_shape",
+      "name": "yaml_unsafe_load",
+      "regex": "yaml\\.(?:load|unsafe_load)\\s*\\([^)]*(?:Loader\\s*=\\s*yaml\\.(?:Loader|UnsafeLoader|FullLoader))?",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-502",
+      "description": "Unsafe YAML loading -- arbitrary code execution risk",
+      "remediation": "Use yaml.safe_load() instead of yaml.load(). Never use yaml.UnsafeLoader.",
+      "requires_agent_signals": false,
+      "category": "input_validation"
+    },
+    {
+      "id": "cd-pyimport-marshal_loads",
+      "detector_kind": "code_shape",
+      "name": "marshal_loads",
+      "regex": "marshal\\.loads?\\s*\\(",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-502",
+      "description": "marshal deserialization -- code execution risk from untrusted data",
+      "remediation": "Avoid deserializing untrusted data with marshal. Use JSON or another safe format.",
+      "requires_agent_signals": false,
+      "category": "input_validation"
+    },
+    {
+      "id": "cd-pyimport-os_system",
+      "detector_kind": "code_shape",
+      "name": "os_system",
+      "regex": "os\\.system\\s*\\(",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-78",
+      "description": "os.system() -- command injection risk",
+      "remediation": "Use subprocess.run() with shell=False and argument lists instead of os.system().",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-pyimport-tempfile_insecure",
+      "detector_kind": "code_shape",
+      "name": "tempfile_insecure",
+      "regex": "(?:tempfile\\.)?mktemp\\s*\\(",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-377",
+      "description": "Insecure temporary file creation -- race condition risk",
+      "remediation": "Use tempfile.mkstemp() or tempfile.NamedTemporaryFile() for secure temp file creation.",
+      "requires_agent_signals": false,
+      "category": "configuration"
+    },
+    {
+      "id": "cd-pyimport-assert_security",
+      "detector_kind": "code_shape",
+      "name": "assert_security",
+      "regex": "assert\\s+.*(?:auth|permission|role|admin|allowed|valid)",
+      "languages": [
+        "python"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-617",
+      "description": "Security check using assert -- stripped in optimized mode (-O)",
+      "remediation": "Replace assert with explicit if/raise for security-critical checks. Assert is for debugging only.",
+      "requires_agent_signals": false,
+      "category": "authorization"
+    },
+    {
+      "id": "cd-jsimport-eval_usage",
+      "detector_kind": "code_shape",
+      "name": "eval_usage",
+      "regex": "\\beval\\s*\\(",
+      "languages": [
+        "javascript"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-95",
+      "description": "Use of eval() -- arbitrary code execution risk",
+      "remediation": "Use JSON.parse() for data, or a sandboxed evaluator. Never eval untrusted input.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-jsimport-innerhtml_xss",
+      "detector_kind": "code_shape",
+      "name": "innerhtml_xss",
+      "regex": "\\.innerHTML\\s*=",
+      "languages": [
+        "javascript"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-79",
+      "description": "Direct innerHTML assignment -- cross-site scripting (XSS) risk",
+      "remediation": "Use textContent for plain text, or sanitize with DOMPurify before setting innerHTML.",
+      "requires_agent_signals": false,
+      "category": "input_validation"
+    },
+    {
+      "id": "cd-jsimport-document_write",
+      "detector_kind": "code_shape",
+      "name": "document_write",
+      "regex": "document\\.write\\s*\\(",
+      "languages": [
+        "javascript"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-79",
+      "description": "document.write() -- XSS risk and performance issues",
+      "remediation": "Use DOM manipulation methods (createElement, appendChild) instead of document.write().",
+      "requires_agent_signals": false,
+      "category": "input_validation"
+    },
+    {
+      "id": "cd-jsimport-child_process_exec",
+      "detector_kind": "code_shape",
+      "name": "child_process_exec",
+      "regex": "(?:child_process|exec|execSync|spawn)\\s*\\(",
+      "languages": [
+        "javascript"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-78",
+      "description": "Command execution -- injection risk if input is unsanitized",
+      "remediation": "Use execFile() with argument arrays. Never interpolate user input into shell commands.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-jsimport-new_function",
+      "detector_kind": "code_shape",
+      "name": "new_function",
+      "regex": "new\\s+Function\\s*\\(",
+      "languages": [
+        "javascript"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-95",
+      "description": "new Function() constructor -- equivalent to eval()",
+      "remediation": "Avoid dynamic function creation. Use predefined functions or a safe dispatch pattern.",
+      "requires_agent_signals": false,
+      "category": "injection"
+    },
+    {
+      "id": "cd-agent-prompt_injection_risk",
+      "detector_kind": "code_shape",
+      "name": "prompt_injection_risk",
+      "regex": "(?i)(?:system_prompt|system_message|instructions)\\s*[:=]\\s*.*(?:user|input|request)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-74",
+      "description": "Potential prompt injection -- user input mixed into system prompt",
+      "remediation": "Sanitize and validate all user input before including in prompts. Use structured prompt templates with clear boundaries.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    },
+    {
+      "id": "cd-agent-unrestricted_tool_access",
+      "detector_kind": "code_shape",
+      "name": "unrestricted_tool_access",
+      "regex": "(?i)(?:tools?\\s*[:=]\\s*\\[.*(?:all|any|\\*))",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-269",
+      "description": "Unrestricted tool access for agent -- excessive privilege",
+      "remediation": "Apply least-privilege: only expose the specific tools the agent needs. Use allowlists, not denylists.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    },
+    {
+      "id": "cd-agent-unvalidated_tool_output",
+      "detector_kind": "code_shape",
+      "name": "unvalidated_tool_output",
+      "regex": "(?i)(?:tool_result|function_result|tool_output)\\s*.*(?:exec|eval|execute|run)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-20",
+      "description": "Tool output used without validation -- injection via tool results",
+      "remediation": "Validate and sanitize all tool outputs before using them in prompts or executing them.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    },
+    {
+      "id": "cd-agent-context_overflow",
+      "detector_kind": "code_shape",
+      "name": "context_overflow",
+      "regex": "(?i)(?:max_tokens|context_length|token_limit)\\s*[:=]\\s*(?:\\d{6,}|None|null|float)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-400",
+      "description": "Unbounded or excessively large context window -- resource exhaustion risk",
+      "remediation": "Set reasonable token limits. Implement input truncation and summarization for long contexts.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    },
+    {
+      "id": "cd-agent-no_output_filter",
+      "detector_kind": "code_shape",
+      "name": "no_output_filter",
+      "regex": "(?i)(?:guardrails?\\s*[:=]\\s*(?:None|null|False|false|\\[\\]|{}))",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "high",
+      "cwe": "CWE-20",
+      "description": "No output guardrails configured -- unfiltered agent output",
+      "remediation": "Implement output validation, content filtering, and safety guardrails for all agent responses.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    },
+    {
+      "id": "cd-agent-raw_llm_to_system",
+      "detector_kind": "code_shape",
+      "name": "raw_llm_to_system",
+      "regex": "(?i)(?:os\\.system|subprocess|exec|eval)\\s*\\(\\s*(?:response|output|result|completion|message)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "critical",
+      "cwe": "CWE-78",
+      "description": "LLM output passed directly to system command execution",
+      "remediation": "Never execute LLM output as code or system commands. Use structured actions with validated parameters.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    },
+    {
+      "id": "cd-agent-memory_poisoning_risk",
+      "detector_kind": "code_shape",
+      "name": "memory_poisoning_risk",
+      "regex": "(?i)(?:memory|context|history)\\.(?:add|append|insert|update)\\s*\\(\\s*(?:user|input|message)",
+      "languages": [
+        "*"
+      ],
+      "base_severity": "medium",
+      "cwe": "CWE-20",
+      "description": "User input stored directly in agent memory -- memory poisoning risk",
+      "remediation": "Validate and sanitize user input before storing in agent memory. Implement memory integrity checks.",
+      "requires_agent_signals": true,
+      "category": "agent_security"
+    }
+  ]
+}
