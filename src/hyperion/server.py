@@ -504,6 +504,70 @@ def log_finding(
 
 
 # ---------------------------------------------------------------------------
+# Tool: validate_detector
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def validate_detector(
+    pattern: str,
+    conn: Any = None,
+) -> dict:
+    """Validate a PROPOSED code-detector regex against Hyperion's ReDoS guards.
+
+    The promote-gate an offline pipeline calls before admitting a proposed regex
+    as a scan_code detector: it must clear the load-time static ReDoS quarantine
+    AND survive the runtime per-match deadline scan_code enforces -- the same bar
+    a shipped detector meets. Reached through the summon seam so a caller never
+    imports Hyperion.
+
+    Args:
+        pattern: The proposed detector regex (string). ``regex`` and
+            ``detector_regex`` are accepted aliases.
+        conn: Kuzu/LadybugDB connection (injected by Othrys); unused.
+
+    Returns: {ok, reason} -- the single filed contract in
+             hyperion.tools.validate_detector. ``ok`` is True only for a
+             compilable, ReDoS-safe regex; otherwise ``reason`` names the guard.
+    """
+    from hyperion.tools.validate_detector import validate_detector as _impl
+    return _impl(pattern, conn)
+
+
+# ---------------------------------------------------------------------------
+# Tool: grade_detector_batch
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def grade_detector_batch(
+    candidate_batch: Union[list, None] = None,
+    conn: Any = None,
+) -> dict:
+    """Grade a PROPOSED detector batch per stratum over the frozen corpus.
+
+    The measurement arm of the promotion quality gate (S5): it runs the curated
+    scan_code detector island UNION the candidate batch over the 65 vulnerable +
+    65 secure stratum-C examples and returns the per-stratum firing COUNTS. The
+    generic admission math (othrys.admission.admit_batch) consumes those counts as
+    plain data across the firewall; this tool never decides admission.
+
+    Args:
+        candidate_batch: The proposed detectors (list of dicts, each with at least
+            a ``regex``). ``batch`` and ``candidate_detectors`` are accepted
+            aliases. An empty/absent batch grades the shipped island alone and
+            returns the frozen 12/2.
+        conn: Kuzu/LadybugDB connection (injected by Othrys); unused -- the grade
+            runs on the on-disk corpus in-process.
+
+    Returns: {ok, vuln_total, secure_total, baseline_vuln, baseline_secure,
+              candidate_vuln, candidate_secure} -- the single filed contract in
+              hyperion.tools.grade_detector_batch. Fails closed ({ok: False,
+              reason}) on baseline drift from the frozen anchor.
+    """
+    from hyperion.tools.grade_detector_batch import grade_detector_batch as _impl
+    return _impl(candidate_batch, conn)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

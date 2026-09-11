@@ -215,6 +215,33 @@ class TestCoerce:
         assert coerce(["x"], dict) is None  # wrong type, no default -> None
 
 
+def _sql_sid() -> str:
+    """The real threat-signal id for the injection_sql detection signal, taken
+    from the accessor's OWN output (never hand-built)."""
+    view = get_signal_index()["threat_signals"]
+    return next(
+        e["signal_id"] for e in view
+        if e["signal_text"] == "user input concatenated into SQL query string"
+    )
+
+
+def _agent_hit_ids() -> list[str]:
+    """Two DISTINCT agent-threat signal ids that BOTH resolve to the SAME agent
+    threat, taken from the accessor's OWN output (never hand-built, Directive 8).
+
+    Two votes on one agent_threat clear the confidence floor, so hydrate_agent
+    reaches a genuine ``hit`` — a real agent-threat recognition, not an abstention.
+    The ids live only in the agent id-space (disjoint from the threat vectors), so
+    the threat view abstains (no_match) on them: the AGENT-ONLY-HIT shape.
+    """
+    by_threat: dict[str, list[str]] = {}
+    for e in get_signal_index()["agent_threat_signals"]:
+        for tid in e["agent_threat_ids"]:
+            by_threat.setdefault(tid, []).append(e["signal_id"])
+    sigs = next(s for s in by_threat.values() if len(s) >= 2)
+    return sigs[:2]
+
+
 class TestAssessThreatHardening:
 
     def test_truthy_wrong_type_constraints_does_not_crash(self):
@@ -226,6 +253,120 @@ class TestAssessThreatHardening:
             constraints=["not", "a", "dict"],
         )
         assert isinstance(result, dict)
+
+    # --- S-TOOLFIX1: never turned away by argument shape alone --------------
+
+    def test_prose_in_matched_signal_ids_returns_guidance_envelope(self):
+        # The proven premise: the SAME words that hit as a sig-id return a bare
+        # empty no_match when passed as prose. Now the abstention must carry a
+        # self-correcting guidance field, not a silent empty.
+        result = assess_threat(
+            "web api with a sql database",
+            ["user input concatenated into SQL query string"],
+        )
+        assert result["threat_model"] == []
+        assert result["threat_retrieval_state"] == "no_match"
+        assert "guidance" in result, "abstention must name the expected shape"
+        assert "get_signal_index" in result["guidance"]
+        assert "matched_signal_ids" in result["guidance"]
+
+    def test_retired_structural_signals_dropped_not_typeerror(self):
+        # The retired prose param must drop-with-warning and abstain with
+        # guidance, NOT raise a raw TypeError. It is NOT aliased to
+        # matched_signal_ids (that would resurrect the deleted matcher).
+        result = assess_threat(
+            "web api",
+            structural_signals="user input concatenated into SQL query string",
+        )
+        assert isinstance(result, dict)
+        assert result["threat_model"] == []
+        assert "guidance" in result
+
+    def test_retired_assets_dropped_not_typeerror(self):
+        result = assess_threat("web api", assets=["customer database"])
+        assert isinstance(result, dict)
+        assert "guidance" in result
+
+    def test_omitted_matched_signal_ids_abstains_non_raising(self):
+        # An omitted matched_signal_ids must abstain cleanly (coerce None -> []),
+        # not raise a raw TypeError on the missing positional.
+        result = assess_threat("web api")
+        assert isinstance(result, dict)
+        assert result["threat_model"] == []
+        assert "guidance" in result
+
+    def test_system_alias_maps_to_system_description(self):
+        # `system` is a genuine synonym of the real param; a clean HIT through it
+        # is unchanged and carries NO guidance.
+        result = assess_threat(system="web api", matched_signal_ids=[_sql_sid()])
+        assert result["threat_model"], "the alias must reach the real param"
+        assert "guidance" not in result
+
+    def test_description_alias_maps_to_system_description(self):
+        result = assess_threat(description="web api", matched_signal_ids=[_sql_sid()])
+        assert result["threat_model"]
+        assert "guidance" not in result
+
+    def test_clean_hit_is_unchanged_no_guidance(self):
+        result = assess_threat("web api", [_sql_sid()])
+        assert result["threat_model"]
+        assert result["threat_retrieval_state"] in ("hit", "low_confidence")
+        assert "guidance" not in result, "guidance must never ride a HIT"
+        # The dual-state envelope the reactive gap hook keys on is preserved.
+        assert "threat_retrieval_state" in result
+        assert "agent_retrieval_state" in result
+
+    def test_constraint_gated_hit_carries_no_guidance(self):
+        # The load-bearing suppression: a caller whose ids WERE recognised but whose
+        # vectors are all removed by a constraint gate must NOT be told their ids were
+        # wrong. guidance rides ONLY a genuine no-recognition abstention (filtered_out
+        # empty) — never a gated hit (filtered_out non-empty), even though threat_model
+        # and agent_risks are both empty. Binds the `not filtered_out` guard: without it
+        # a recognized-then-filtered caller is falsely handed the accessor guidance.
+        result = assess_threat(
+            "web api",
+            [_sql_sid(), _sql_sid()],
+            constraints={"category": "no-such-category"},
+        )
+        assert result["threat_model"] == []
+        assert result["filtered_out"], "the gate must record the excluded vectors"
+        assert "guidance" not in result, "guidance must never ride a constraint-gated hit"
+
+    def test_agent_only_hit_carries_no_guidance(self):
+        # Binds the `not agent_risks` conjunct of the guidance guard (council
+        # b92aabfe surviving mutant). AGENT-ONLY hit: the ids resolve ONLY in the
+        # agent id-space, so the threat view abstains (threat_model == [],
+        # no_match) while the agent view genuinely recognises the threat
+        # (agent_risks non-empty, agent_retrieval_state == "hit"). With
+        # filtered_out empty, guidance must STILL be suppressed — the caller was
+        # recognised (as an agent threat), not turned away. Drop `not agent_risks`
+        # and this recognised caller is falsely handed the accessor guidance:
+        # not threat_model (True) and not filtered_out (True) => guidance rides a hit.
+        result = assess_threat("LLM agent with tool calling", _agent_hit_ids())
+        assert result["threat_model"] == []
+        assert result["threat_retrieval_state"] == "no_match"
+        assert result["agent_risks"], "an agent-threat hit must yield agent_risks"
+        assert result["agent_retrieval_state"] == "hit", "a genuine agent recognition, not an abstention"
+        assert result["filtered_out"] == []
+        assert "guidance" not in result, "guidance must never ride an agent-only hit"
+
+    def test_retired_param_dropped_but_valid_ids_still_hit(self):
+        # A retired param passed ALONGSIDE valid ids is dropped; the valid ids
+        # still resolve to a full model (retired vocab is ignored, not aliased
+        # onto matched_signal_ids, which would corrupt the id list).
+        result = assess_threat(
+            "web api",
+            matched_signal_ids=[_sql_sid()],
+            structural_signals="ignored prose",
+        )
+        assert result["threat_model"]
+        assert "guidance" not in result
+
+    def test_unknown_kwarg_still_raises(self):
+        # A genuine typo is NOT swallowed — normalize_kwargs leaves it to the
+        # wrapped signature's standard TypeError.
+        with pytest.raises(TypeError):
+            assess_threat("web api", [], totally_unknown="boom")
 
 
 class TestScanCodeHardening:

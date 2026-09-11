@@ -49,7 +49,34 @@ from hyperion.tools._shared import (
     coerce,
     emit_event,
     get_knowledge,
+    normalize_kwargs,
     project_node,
+)
+
+# Caller kwarg synonyms remapped to the canonical signature (read by
+# @normalize_kwargs). ``_ALIASES`` carries ONLY genuine synonyms of a REAL current
+# param: ``system``/``description`` both mean ``system_description`` (the tool's one
+# text param). ``_IGNORED`` carries the RETIRED vocabulary of the deleted substring
+# matcher — dropped-with-warning so an old-style caller gets the loud guidance
+# envelope below instead of a raw TypeError. Retired vocab is IGNORED, never aliased
+# to matched_signal_ids: it is a DIFFERENT vocabulary (prose, not ids), and aliasing
+# it onto the id list would resurrect the very substring matcher S3 deleted — the
+# retired prose param stays retired.
+_ALIASES = {"system": "system_description", "description": "system_description"}
+_IGNORED = {"structural_signals", "assets"}
+
+# The self-correcting guidance ridden on an abstaining envelope (below). A caller
+# turned away by argument shape alone — prose or a mistyped/omitted id, or a retired
+# param @normalize_kwargs just dropped — otherwise gets a bare empty model with no way
+# to recover, and that silent no_match also trips Othrys' reactive coverage-gap hook
+# into a FALSE gap proposal for an existing signal. Naming the expected shape and the
+# accessor turns the dead-end into a next step.
+_GUIDANCE = (
+    "No threat vectors or agent risks matched. `matched_signal_ids` must be a list "
+    "of signal ids recognised against `get_signal_index` (its `threat_signals` / "
+    "`agent_threat_signals` views) — not prose, a system description, or a retired "
+    "param. Call `get_signal_index`, match this system's signals against it, and "
+    "pass the resulting ids as `matched_signal_ids`."
 )
 
 # The threat-vector fields the model surfaces — each vector's OWN data (no table).
@@ -64,9 +91,10 @@ _AGENT_FIELDS: tuple[str, ...] = (
 )
 
 
+@normalize_kwargs
 def assess_threat(
     system_description: str,
-    matched_signal_ids: list[str],
+    matched_signal_ids: list[str] | None = None,
     constraints: dict | None = None,
     k: int = 10,
     conn: object = None,
@@ -79,8 +107,10 @@ def assess_threat(
         matched_signal_ids: Signal ids the caller recognised against
             ``get_signal_index`` (both views). Threat-vector ids hydrate the
             ``threat_model``; agent-threat ids hydrate ``agent_risks``; the disjoint
-            id-spaces route each id to exactly one corpus. The retired
-            ``structural_signals`` prose param has NO alias shim.
+            id-spaces route each id to exactly one corpus. Omitted / None / mistyped
+            abstains cleanly (coerced to ``[]``) instead of raising. The retired
+            ``structural_signals`` prose param has NO alias shim — it is dropped with
+            a warning by ``@normalize_kwargs`` (see ``_IGNORED``), never resurrected.
         constraints: Optional dict — ``category`` / ``severity`` (floor) / ``owasp``
             drive the deterministic exclusion gate over the hydrated threat vectors.
         k: Number of ranked results per view (engine-clamped to 1..50).
@@ -91,7 +121,9 @@ def assess_threat(
         ``threat_model`` (hydrated vectors' own fields) / ``agent_risks`` (hydrated
         agent_threats' own fields) / ``filtered_out`` / ``threat_retrieval_state`` /
         ``agent_retrieval_state`` / ``unmatched_signals`` / ``dangling``. Fail-closed:
-        an abstaining envelope returns empty lists, never a husk.
+        an abstaining envelope returns empty lists, never a husk. When nothing was
+        recognised and nothing was gated out, an ADDITIVE ``guidance`` field names the
+        expected shape and the accessor (never present on a hit).
     """
     # Fail-safe at the caller boundary: a malformed payload abstains cleanly.
     matched_signal_ids = coerce(matched_signal_ids, list, default=[])
@@ -161,6 +193,16 @@ def assess_threat(
         "unmatched_signals": unmatched,
         "dangling": dangling,
     }
+
+    # Ride the self-correcting guidance ONLY on a genuine no-recognition abstention:
+    # nothing retrieved AND nothing gated out. ``filtered_out`` empty is the line
+    # between "you gave me nothing I recognise" (guide the caller to the accessor)
+    # and "your constraint removed a real hit" (already self-explained by
+    # filtered_out) — the latter must NOT be told its ids were wrong. The field is
+    # ADDITIVE: it never appears on a hit, and adds no fifth state / no *_retrieval_
+    # state key, so the dual-state contract the reactive gap hook keys on is intact.
+    if not threat_model and not agent_risks and not filtered_out:
+        result["guidance"] = _GUIDANCE
 
     emit_event("assess_threat", {
         "system_description": system_description[:120] if isinstance(system_description, str) else "",

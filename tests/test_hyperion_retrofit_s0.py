@@ -44,6 +44,18 @@ import pytest
 
 from hyperion.knowledge.loader import _KNOWLEDGE_DIR, KnowledgeLoader
 from hyperion.tools.scan_code import scan_code
+# The stratum-C findings-coverage measurement and its frozen floors now live in
+# production (hyperion.tools.grade_detector_batch) so the S5 promotion-gate tool can
+# reach them across the summon sandbox, which admits hyperion.* but not tests.*.
+# One source of truth: authored here, they are imported BACK -- value and method
+# unchanged, still asserted by the frozen-set tests below and reused by R2/R6/S5/S6.
+from hyperion.tools.grade_detector_batch import (  # noqa: F401 (re-exported)
+    BASELINE_C_SECURE_FIRING,
+    BASELINE_C_SECURE_TOTAL,
+    BASELINE_C_VULN_FIRING,
+    BASELINE_C_VULN_TOTAL,
+    stratum_c_coverage,
+)
 
 KNOWLEDGE_DIR = Path(_KNOWLEDGE_DIR)
 
@@ -157,30 +169,8 @@ def canonical(obj: dict) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
 
-def stratum_c_coverage(knowledge_dir: Path) -> dict:
-    """Measure the CURRENT scanner's findings coverage over corpus examples."""
-    vectors, _, _ = _load_corpus(knowledge_dir)
-    vuln_firing: set[str] = set()
-    secure_firing: set[str] = set()
-    vuln_total = secure_total = 0
-    for v in vectors:
-        examples = v.get("examples") or {}
-        vulnerable = examples.get("vulnerable")
-        secure = examples.get("secure")
-        if vulnerable:
-            vuln_total += 1
-            if scan_code(vulnerable, "python")["findings"]:
-                vuln_firing.add(v["id"])
-        if secure:
-            secure_total += 1
-            if scan_code(secure, "python")["findings"]:
-                secure_firing.add(v["id"])
-    return {
-        "vuln_firing": vuln_firing,
-        "vuln_total": vuln_total,
-        "secure_firing": secure_firing,
-        "secure_total": secure_total,
-    }
+# ``stratum_c_coverage`` now lives in hyperion.tools.grade_detector_batch (imported
+# above) -- the ONE source of truth for the stratum-C findings-coverage measurement.
 
 
 # ===========================================================================
@@ -200,17 +190,10 @@ BASELINE_A_COMBINED = (73, 295)
 # natural-language detection_signal to an agent_threat id: the floor is zero.
 BASELINE_B = (0, 64)
 
-# Stratum C -- scan_code findings coverage over the corpus's own examples.
-BASELINE_C_VULN_FIRING = frozenset({
-    "agent_insecure_output", "auth_password_storage", "config_debug_production",
-    "crypto_cleartext_transmission", "crypto_hardcoded_secrets",
-    "crypto_improper_certificate", "crypto_weak_algorithms",
-    "data_api_key_exposure", "data_database_dumps", "injection_command",
-    "injection_sql", "input_deserialization",
-})
-BASELINE_C_SECURE_FIRING = frozenset({"data_database_dumps", "injection_sql"})
-BASELINE_C_VULN_TOTAL = 65
-BASELINE_C_SECURE_TOTAL = 65
+# Stratum C -- scan_code findings coverage over the corpus's own examples. The
+# firing SETS + denominators (BASELINE_C_VULN_FIRING / BASELINE_C_SECURE_FIRING /
+# BASELINE_C_VULN_TOTAL / BASELINE_C_SECURE_TOTAL) are imported above from
+# hyperion.tools.grade_detector_batch -- one source of truth, still asserted below.
 # The doubly-dead corpus bridge: get_detection_patterns(LANGUAGE) keys on
 # threat_id, so ZERO of the 316 corpus detection_patterns reach the scanner.
 BASELINE_C_CORPUS_PATTERNS_REACHABLE = 0

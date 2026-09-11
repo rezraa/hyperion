@@ -833,7 +833,19 @@ class KnowledgeLoader(_SignalEngine):
     # Initialisation
     # ------------------------------------------------------------------
 
-    def __init__(self, knowledge_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        knowledge_dir: Path | None = None,
+        *,
+        extra_code_detectors: list[dict] | None = None,
+    ) -> None:
+        # ``extra_code_detectors`` is the promotion-gate GRADING seam (S5): a
+        # PROPOSED detector batch is appended to the shipped set below and then runs
+        # through the SAME load-time ReDoS quarantine, the SAME per-language index,
+        # and the SAME scan path — so a candidate is measured EXACTLY as it would run
+        # live, never on a bespoke reduced path. Additive and in-memory only: with no
+        # batch the load is byte-identical to before, and ``code_detectors.json`` on
+        # disk is never touched, so the byte-frozen S0 benchmark is unaffected.
         self._dir = knowledge_dir or _KNOWLEDGE_DIR
 
         with open(self._dir / "threat_vectors.json", encoding="utf-8") as f:
@@ -857,6 +869,10 @@ class KnowledgeLoader(_SignalEngine):
         self._rules: list[dict] = self._decision_rules_data["rules"]
         self._tools: list[dict] = self._security_tools_data["tools"]
         self._code_detectors: list[dict] = self._code_detectors_data["detectors"]
+        if extra_code_detectors:
+            # Append the proposed batch so it shares the one quarantine + index +
+            # scan path (the grading seam described in __init__).
+            self._code_detectors = self._code_detectors + list(extra_code_detectors)
 
         # Index: vector_id -> vector_dict
         self._vector_index: dict[str, dict] = {

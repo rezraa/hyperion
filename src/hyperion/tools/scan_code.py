@@ -274,6 +274,7 @@ def scan_code(
     language: str = "python",
     context: str | None = None,
     conn: object = None,
+    kb: object = None,
 ) -> dict:
     """Scan code for security vulnerabilities using regex-based detection.
 
@@ -284,6 +285,12 @@ def scan_code(
         context: Optional description of where this code runs (e.g. "API
             endpoint handling user uploads") to inform severity weighting.
         conn: Kuzu/LadybugDB connection for graph mode, or None for JSON.
+        kb: Optional pre-built KnowledgeLoader used IN PLACE OF ``get_knowledge``.
+            The promotion-gate grading seam (S5): the grader runs THIS exact scan
+            path over a baseline-plus-candidate loader so the augmented detector set
+            is measured identically to the shipped set. Not surfaced by the MCP
+            wrapper (server.py forwards only ``conn``), so it is not caller-reachable
+            over MCP. When ``None`` the loader resolves from ``conn`` as before.
 
     Returns:
         Dict with keys: findings (list), summary (severity counts),
@@ -302,7 +309,7 @@ def scan_code(
     """
     context = coerce(context, str)
 
-    kb = get_knowledge(conn)
+    kb = kb if kb is not None else get_knowledge(conn)
     detectors = kb.get_code_detectors(language)
     # Bound the untrusted input where the detectors x lines cost is incurred (CWE-400):
     # cap the scanned line count and truncate each line before the scan loop below, so
